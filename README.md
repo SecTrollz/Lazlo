@@ -62,7 +62,7 @@ com.evan.lazlo/
 |---|---|---|
 | AI backend | `AiProvider` | `ApiKeyProvider` (BYOK REST), `AiCoreProvider` (Gemini Nano, on-device), `MediaPipeProvider` (local model file, on-device) |
 | Browser engine | `BrowserEngine` | `ChromiumEngine` (system WebView), `GeckoEngine` (GeckoView) |
-| Traffic inspector | — | `CertificateAuthority`, `MitmVpnService`, `TrafficInterceptor` |
+| Traffic inspector | — | `CertificateAuthority`, `LeafCertificateFactory`, `MitmVpnService`, `TrafficInterceptor` + the packet pump in `proxy/net/` |
 
 Secrets (API keys, the inspector's CA private key) live only in Android
 Keystore-backed storage — never in DataStore, never in plaintext, never
@@ -70,21 +70,27 @@ included in backups.
 
 ## Project status
 
-This repo currently holds the app's scaffolding: all four modules with
-their interfaces and per-class implementations, a `MainActivity` wiring
-a browser tab + engine picker + inspector toggle together, and the
-Gradle project shell to open it in Android Studio. The two heaviest
-pieces — the interceptor's actual packet pump, and Keystore-backed CA
-private key storage — are left as documented skeletons. See
-[`ARCHITECTURE.md`](ARCHITECTURE.md#build-out-order) for the intended
-build-out order.
+All four modules are implemented, not stubbed: `MainActivity` wires a
+browser tab, engine picker, and inspector toggle together, and the
+Gradle project shell opens and builds cleanly in Android Studio. That
+now includes what were previously the two heaviest open pieces — the
+CA's Keystore-backed private key and the inspector's actual TUN packet
+pump + TLS-terminating relay (`proxy/net/`) — both real implementations
+with passing JVM unit tests for the parts that don't need a device.
+
+What's *not* yet done is on-device validation of the VPN/TUN path
+itself (that can only be exercised on a real device or emulator, not in
+a build sandbox) — see [`ARCHITECTURE.md`](ARCHITECTURE.md#current-state)
+for the honest current-state breakdown before relying on the inspector
+for anything beyond development.
 
 ## Getting started
 
 1. Open the project root in Android Studio (Koala/2024.1+) and let it
    sync — it's a standard Gradle Android project (AGP 8.6, Kotlin 2.0,
    Compose). `./gradlew assembleDebug` builds cleanly from the command
-   line too.
+   line too, and `./gradlew testDebugUnitTest` runs the JVM-level unit
+   tests (IPv4/TCP codec, CA/leaf certificate signing).
 2. Run the `app` module on a device or emulator running API 31+ (the
    AICore on-device provider's own client library sets that floor).
 3. In-app: pick a browser engine, optionally add an API key or point at

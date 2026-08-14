@@ -1,8 +1,13 @@
 package com.evan.lazlo.proxy
 
 import android.os.ParcelFileDescriptor
+import com.evan.lazlo.proxy.net.TcpIpStack
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.net.DatagramSocket
+import java.net.Socket
+import java.security.PrivateKey
 import java.security.cert.X509Certificate
 import java.time.Instant
 
@@ -29,29 +34,38 @@ object TrafficLog {
 }
 
 /**
- * Skeleton for the actual packet pump: reads IP packets from the TUN fd,
- * reassembles TCP streams per (srcPort, dstHost), and for port 443
- * terminates TLS locally with a leaf cert re-signed by the local CA
- * (one leaf per host, cached), then opens a real upstream TLS connection
- * to the original destination and shuttles bytes both ways while logging
- * each HTTP request/response line. Full implementation lives on top of
- * a userspace TCP/IP stack (e.g. a Kotlin port of gVisor's netstack or
- * tun2socks) — omitted here as it's a substantial standalone component.
+ * Thin wrapper tying [TcpIpStack] — the actual packet pump — to the
+ * lifecycle [MitmVpnService] drives it with, and to this app's own
+ * request-logging ([TrafficLog]) and CA plumbing. See [TcpIpStack]'s own
+ * doc for what the pump does and, importantly, what it deliberately
+ * doesn't (its "one local, well-behaved TCP peer" scope note).
  */
 class TrafficInterceptor(
-    private val ca: X509Certificate,
+    private val caCertificate: X509Certificate,
+    private val caPrivateKey: PrivateKey,
+    private val protectSocket: (Socket) -> Boolean,
+    private val protectDatagramSocket: (DatagramSocket) -> Boolean,
     private val onRequest: (TrafficEntry) -> Unit,
+    private val scope: CoroutineScope,
 ) {
+    private var stack: TcpIpStack? = null
+
     suspend fun pump(tunFd: ParcelFileDescriptor) {
-        // 1. Read raw packets from tunFd.
-        // 2. Hand IPv4/TCP streams to a userspace stack (tun2socks-style).
-        // 3. For each new TCP stream on :443, do local TLS termination
-        //    with a per-host leaf cert signed by `ca`, then dial the real
-        //    host over TLS and relay, calling onRequest() per exchange.
-        // 4. For :80, parse HTTP directly.
+        val running = TcpIpStack(
+            tunFd = tunFd,
+            protectSocket = protectSocket,
+            protectDatagramSocket = protectDatagramSocket,
+            caCertificate = caCertificate,
+            caPrivateKey = caPrivateKey,
+            onHttpExchange = onRequest,
+            scope = scope,
+        )
+        stack = running
+        running.pump() // suspends for as long as the VPN interface is up
     }
 
-    suspend fun shutdown() {
-        // Close all active streams / the userspace stack cleanly.
+    fun shutdown() {
+        stack?.shutdown()
+        stack = null
     }
 }
