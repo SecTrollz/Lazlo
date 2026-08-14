@@ -19,6 +19,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Screenshot
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -109,6 +110,31 @@ fun InspectorScreen(
                     "Shows the requests this device makes — decrypted locally, on this device only. " +
                         "Nothing captured here is ever sent anywhere.",
                     style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.size(12.dp))
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Filled.Screenshot, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    Spacer(modifier = Modifier.size(8.dp))
+                    Text("Block screenshots & screen recording", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                    Switch(
+                        checked = state.screenshotProtectionEnabled,
+                        onCheckedChange = viewModel::setScreenshotProtectionEnabled,
+                    )
+                }
+                Text(
+                    if (state.screenshotProtectionEnabled) {
+                        "On by default: no other app can screenshot or screen-record this app, and it shows a blank Recents thumbnail. Turn this off if you need to capture your own findings — a repro, a report."
+                    } else {
+                        "Off: this app can be screenshotted and screen-recorded like any other, and shows normally in Recents. Turn this back on when you're done."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(top = 8.dp),
                 )
             }

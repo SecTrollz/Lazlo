@@ -25,6 +25,8 @@ data class InspectorUiState(
     val entries: List<TrafficEntry> = emptyList(),
     /** True while the CA is being generated/loaded and the VPN consent flow is being kicked off. */
     val isPreparing: Boolean = false,
+    /** Mirrors Settings.screenshotProtectionFlow; MainActivity applies this to the window independently. */
+    val screenshotProtectionEnabled: Boolean = true,
 )
 
 class InspectorViewModel(application: Application) : AndroidViewModel(application) {
@@ -41,6 +43,15 @@ class InspectorViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch {
             TrafficLog.entries.collect { entries -> _uiState.update { it.copy(entries = entries) } }
         }
+        viewModelScope.launch {
+            settings.screenshotProtectionFlow().collect { enabled ->
+                _uiState.update { it.copy(screenshotProtectionEnabled = enabled) }
+            }
+        }
+    }
+
+    fun setScreenshotProtectionEnabled(enabled: Boolean) {
+        viewModelScope.launch { settings.setScreenshotProtectionEnabled(enabled) }
     }
 
     /**
