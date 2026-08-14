@@ -60,7 +60,9 @@ dependencies {
     implementation("org.json:json:20240303")
 
     // -- browser engine --
-    implementation("org.mozilla.geckoview:geckoview:130.0") // TODO: split into a Play Feature Delivery module
+    // GeckoView ships date-stamped versions from Mozilla's own Maven repo
+    // (declared in settings.gradle.kts) rather than plain semver.
+    implementation("org.mozilla.geckoview:geckoview:130.0.20240913135723") // TODO: split into a Play Feature Delivery module
 
     // -- proxy / inspector --
     implementation("io.netty:netty-all:4.1.110.Final")
