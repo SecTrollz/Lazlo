@@ -37,7 +37,8 @@ data class ChatUiState(
     val errorMessage: String? = null,
     val activeProviderId: String = AiBackendCopy.API_KEY_PROVIDER_ID,
     val backendRows: List<BackendRow> = emptyList(),
-    val apiKeyConfigured: Boolean = false,
+    /** Real "is a key actually saved" per BYOK provider id — distinct from [BackendRow.isReady], which for these rows just mirrors this map. */
+    val apiKeyConfiguredByProvider: Map<String, Boolean> = emptyMap(),
     val backendLoading: Boolean = true,
     val aiCoreSetupRunning: Boolean = false,
     val aiCoreSetupState: AiCoreDownloadState? = null,
@@ -78,7 +79,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 AiBackendCopy.AICORE_PROVIDER_ID -> Settings.AiChoice.AiCore
                 AiBackendCopy.MEDIAPIPE_PROVIDER_ID ->
                     Settings.AiChoice.LocalModel((settings.aiChoice() as? Settings.AiChoice.LocalModel)?.path ?: "")
-                else -> Settings.AiChoice.ApiKey
+                AiBackendCopy.OPENROUTER_PROVIDER_ID -> Settings.AiChoice.ApiKey(AiBackendCopy.OPENROUTER_PROVIDER_ID)
+                else -> Settings.AiChoice.ApiKey(AiBackendCopy.API_KEY_PROVIDER_ID)
             }
             settings.setAiChoice(choice)
             _uiState.update { it.copy(activeProviderId = providerId, errorMessage = null) }
@@ -86,16 +88,16 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** Saves the BYOK key (never surfaced back in plaintext) and refreshes readiness. */
-    fun saveApiKey(rawKey: String) {
+    /** Saves a BYOK key (never surfaced back in plaintext) for whichever provider [providerId] names, and refreshes readiness. */
+    fun saveApiKey(providerId: String, rawKey: String) {
         val trimmed = rawKey.trim()
         if (trimmed.isEmpty()) return
-        secretStore.setApiKey(AiBackendCopy.API_KEY_PROVIDER_ID, trimmed)
+        secretStore.setApiKey(providerId, trimmed)
         viewModelScope.launch { refreshBackendRows() }
     }
 
-    fun clearApiKey() {
-        secretStore.clearApiKey(AiBackendCopy.API_KEY_PROVIDER_ID)
+    fun clearApiKey(providerId: String) {
+        secretStore.clearApiKey(providerId)
         viewModelScope.launch { refreshBackendRows() }
     }
 
@@ -202,20 +204,30 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val localPath = (settings.aiChoice() as? Settings.AiChoice.LocalModel)?.path?.takeIf { it.isNotBlank() }
         val ready = withContext(Dispatchers.IO) { aiProviderFactory.availableProviders(localPath) }
             .associate { it.id to true }
-        // availableProviders() always includes the BYOK backend (a key
-        // can be entered later), so its presence in `ready` doesn't mean
-        // a key is actually configured — check the real source instead.
-        val apiKeyConfigured = withContext(Dispatchers.IO) {
-            secretStore.getApiKey(AiBackendCopy.API_KEY_PROVIDER_ID) != null
+        // availableProviders() always includes every BYOK backend (a key
+        // can be entered later), so presence in `ready` doesn't mean a
+        // key is actually configured — check the real source instead.
+        val apiKeyConfiguredByProvider = withContext(Dispatchers.IO) {
+            mapOf(
+                AiBackendCopy.API_KEY_PROVIDER_ID to (secretStore.getApiKey(AiBackendCopy.API_KEY_PROVIDER_ID) != null),
+                AiBackendCopy.OPENROUTER_PROVIDER_ID to (secretStore.getApiKey(AiBackendCopy.OPENROUTER_PROVIDER_ID) != null),
+            )
         }
 
         val rows = listOf(
             BackendRow(
                 id = AiBackendCopy.API_KEY_PROVIDER_ID,
-                displayName = "Your own API key",
+                displayName = "Your own API key (Anthropic)",
                 explanation = AiBackendCopy.explanation(AiBackendCopy.API_KEY_PROVIDER_ID),
                 isOnDevice = false,
-                isReady = apiKeyConfigured,
+                isReady = apiKeyConfiguredByProvider.getValue(AiBackendCopy.API_KEY_PROVIDER_ID),
+            ),
+            BackendRow(
+                id = AiBackendCopy.OPENROUTER_PROVIDER_ID,
+                displayName = "Your own API key (OpenRouter)",
+                explanation = AiBackendCopy.explanation(AiBackendCopy.OPENROUTER_PROVIDER_ID),
+                isOnDevice = false,
+                isReady = apiKeyConfiguredByProvider.getValue(AiBackendCopy.OPENROUTER_PROVIDER_ID),
             ),
             BackendRow(
                 id = AiBackendCopy.AICORE_PROVIDER_ID,
@@ -239,7 +251,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update {
             it.copy(
                 backendRows = rows,
-                apiKeyConfigured = apiKeyConfigured,
+                apiKeyConfiguredByProvider = apiKeyConfiguredByProvider,
                 backendLoading = false,
             )
         }
@@ -248,7 +260,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private fun choiceToProviderId(choice: Settings.AiChoice): String = when (choice) {
         is Settings.AiChoice.AiCore -> AiBackendCopy.AICORE_PROVIDER_ID
         is Settings.AiChoice.LocalModel -> AiBackendCopy.MEDIAPIPE_PROVIDER_ID
-        is Settings.AiChoice.ApiKey -> AiBackendCopy.API_KEY_PROVIDER_ID
+        is Settings.AiChoice.ApiKey -> choice.providerId
     }
 
     override fun onCleared() {

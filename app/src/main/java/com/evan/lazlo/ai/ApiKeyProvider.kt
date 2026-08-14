@@ -119,5 +119,42 @@ class ApiKeyProvider(
                 json.optJSONObject("delta")?.optString("text", null)
             },
         )
+
+        /**
+         * Ready-made config for OpenRouter's OpenAI-compatible
+         * `/v1/chat/completions` streaming endpoint — one BYOK key, but
+         * routes to whichever underlying model the user picks (defaults
+         * to GPT-4o). Bearer-token auth and an OpenAI-shaped SSE delta
+         * (`choices[0].delta.content`), unlike Anthropic's `delta.text`.
+         */
+        fun openRouterDefault(model: String = "openai/gpt-4o") = Config(
+            id = "openrouter",
+            displayName = "OpenRouter",
+            baseUrl = "https://openrouter.ai/api/v1/chat/completions",
+            model = model,
+            authHeader = { key -> "Authorization" to "Bearer $key" },
+            buildBody = { history, model ->
+                JSONObject().apply {
+                    put("model", model)
+                    put("stream", true)
+                    put("messages", JSONArray(history.map { m ->
+                        JSONObject().apply {
+                            put(
+                                "role",
+                                when (m.role) {
+                                    ChatMessage.Role.USER -> "user"
+                                    ChatMessage.Role.ASSISTANT -> "assistant"
+                                    ChatMessage.Role.SYSTEM -> "system"
+                                },
+                            )
+                            put("content", m.content)
+                        }
+                    }))
+                }
+            },
+            parseSseDelta = { json ->
+                json.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("delta")?.optString("content", null)
+            },
+        )
     }
 }

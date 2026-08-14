@@ -113,10 +113,17 @@ plain language (`AiCoreDiagnosis`) — including the known `NOT_AVAILABLE`
 ("Required LLM feature not found") case that shows up even on genuinely
 supported Pixel hardware.
 
+The BYOK backend is no longer locked to one provider: **OpenRouter** now
+sits alongside Anthropic as its own backend in the picker, each with its
+own independently-stored key, so you can bring a key for either (or
+both) — OpenRouter defaults to GPT-4o but routes to whatever model you
+configure.
+
 The pure logic across all of this (the IPv4/TCP codec, certificate
 signing, the Netty handshake, message-transcript folding, traffic-log
 formatting, address-bar resolution, backend/engine copy, AICore error
-diagnosis) is covered by 58 passing JVM unit tests; see
+diagnosis, BYOK request/response shaping) is covered by 64 passing JVM
+unit tests; see
 [`ARCHITECTURE.md`](ARCHITECTURE.md#5-ui--the-three-screens).
 
 What's *not* yet fully proven out is the GeckoView module's actual

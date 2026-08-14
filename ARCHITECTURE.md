@@ -53,7 +53,15 @@ interface AiProvider {
 Three implementations behind one interface, selected at runtime in
 Settings and persisted via DataStore:
 
-- **ApiKeyProvider** — generic BYOK REST client. Key is written only to
+- **ApiKeyProvider** — generic BYOK REST client, config-driven (base URL,
+  model, auth header shape, request/response shape) so it isn't tied to
+  one provider. Two ready-made configs ship: `anthropicDefault()`
+  (Anthropic's `/v1/messages`) and `openRouterDefault()` (OpenRouter's
+  OpenAI-compatible `/v1/chat/completions`, routing to whichever model
+  the user picks — GPT-4o by default). Each is its own backend in the
+  picker with its own stored key (`SecretStore` keys by provider id, so
+  "anthropic" and "openrouter" never collide) — `Settings.AiChoice.ApiKey`
+  carries which one is active. Keys are written only to
   `EncryptedSharedPreferences` (AndroidX Security, backed by Android
   Keystore, hardware-backed on Pixel). Never logged, never included in
   crash reports (no crash reporter is included at all).
@@ -433,13 +441,14 @@ one-line Compose host, not where the app's logic lives. `gradle
 31) and now also builds `:dynamic-features:gecko_engine` as a genuinely
 separate on-demand module (confirmed by inspecting the resulting base
 APK's contents, not just by the build succeeding). `gradle
-:app:testDebugUnitTest` runs and passes 58 JVM-level unit tests under
+:app:testDebugUnitTest` runs and passes 64 JVM-level unit tests under
 `app/src/test/`: the IPv4/TCP codec, the CA/leaf certificate-signing
 logic, a real end-to-end TLS handshake against the Netty MITM pipeline
 (`NettyTlsTerminationTest`), AICore's error-code-to-plain-language
-diagnosis (`AiCoreDiagnosisTest`), and the `ui/` layer's pure logic (chat
-transcript folding, traffic-log formatting, address-bar URL/search
-resolution, the backend/engine explainer copy).
+diagnosis (`AiCoreDiagnosisTest`), the Anthropic/OpenRouter BYOK request
+and response shaping (`ApiKeyProviderConfigTest`), and the `ui/` layer's
+pure logic (chat transcript folding, traffic-log formatting, address-bar
+URL/search resolution, the backend/engine explainer copy).
 
 What were previously the two heaviest documented skeletons are real
 implementations, not stubs:

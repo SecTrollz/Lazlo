@@ -15,18 +15,21 @@ class AiProviderFactory(
     private val secretStore: SecretStore,
 ) {
     fun provider(): AiProvider = when (val choice = settings.aiChoiceBlocking()) {
-        Settings.AiChoice.ApiKey -> ApiKeyProvider(
-            secretStore = secretStore,
-            config = ApiKeyProvider.anthropicDefault(),
-        )
+        is Settings.AiChoice.ApiKey -> apiKeyProviderFor(choice.providerId)
         Settings.AiChoice.AiCore -> AiCoreProvider(context)
         is Settings.AiChoice.LocalModel -> MediaPipeProvider(context, choice.path)
     }
+
+    private fun apiKeyProviderFor(providerId: String): ApiKeyProvider = ApiKeyProvider(
+        secretStore = secretStore,
+        config = if (providerId == "openrouter") ApiKeyProvider.openRouterDefault() else ApiKeyProvider.anthropicDefault(),
+    )
 
     /** All backends currently usable on this device, for the Settings picker. */
     suspend fun availableProviders(localModelPath: String?): List<AiProvider> {
         val candidates = buildList {
             add(ApiKeyProvider(secretStore, ApiKeyProvider.anthropicDefault()))
+            add(ApiKeyProvider(secretStore, ApiKeyProvider.openRouterDefault()))
             add(AiCoreProvider(context))
             if (localModelPath != null) add(MediaPipeProvider(context, localModelPath))
         }
@@ -40,6 +43,9 @@ class AiProviderFactory(
         // lazily on their next isReady()/streamChat() call, so closing
         // them here doesn't make them any less usable afterwards.
         candidates.forEach { it.close() }
-        return candidates.filter { ready.getValue(it) || it.id == "anthropic" } // API key can be entered later
+        // Every BYOK backend is always offered regardless of isReady(),
+        // since a key can always be entered later — checked by type, not
+        // a hardcoded id, so this doesn't need updating for the next one.
+        return candidates.filter { ready.getValue(it) || it is ApiKeyProvider }
     }
 }

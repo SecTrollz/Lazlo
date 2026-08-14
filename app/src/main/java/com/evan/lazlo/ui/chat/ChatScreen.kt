@@ -71,7 +71,10 @@ fun ChatScreen(
 ) {
     val state by viewModel.uiState.collectAsState()
     var showBackendPicker by remember { mutableStateOf(false) }
-    var showApiKeyDialog by remember { mutableStateOf(false) }
+    // Which BYOK provider's key dialog is open, if any — null means closed.
+    // Nullable rather than a Boolean because there are now two BYOK
+    // backends (Anthropic, OpenRouter), each with its own stored key.
+    var manageKeyProviderId by remember { mutableStateOf<String?>(null) }
     val listState = rememberLazyListState()
 
     LaunchedEffect(state.messages.size) {
@@ -121,27 +124,28 @@ fun ChatScreen(
                 viewModel.selectBackend(id)
                 showBackendPicker = false
             },
-            onManageKey = {
+            onManageKey = { providerId ->
                 showBackendPicker = false
-                showApiKeyDialog = true
+                manageKeyProviderId = providerId
             },
             onSetupAiCore = viewModel::setupAiCore,
             onDismiss = { showBackendPicker = false },
         )
     }
 
-    if (showApiKeyDialog) {
+    manageKeyProviderId?.let { providerId ->
         ApiKeyDialog(
-            alreadyConfigured = state.apiKeyConfigured,
+            providerDisplayName = AiBackendCopy.serviceName(providerId),
+            alreadyConfigured = state.apiKeyConfiguredByProvider[providerId] == true,
             onSave = { key ->
-                viewModel.saveApiKey(key)
-                showApiKeyDialog = false
+                viewModel.saveApiKey(providerId, key)
+                manageKeyProviderId = null
             },
             onClear = {
-                viewModel.clearApiKey()
-                showApiKeyDialog = false
+                viewModel.clearApiKey(providerId)
+                manageKeyProviderId = null
             },
-            onDismiss = { showApiKeyDialog = false },
+            onDismiss = { manageKeyProviderId = null },
         )
     }
 }
@@ -288,7 +292,7 @@ private fun ChatInputRow(
 private fun BackendPickerDialog(
     state: ChatUiState,
     onSelect: (String) -> Unit,
-    onManageKey: () -> Unit,
+    onManageKey: (providerId: String) -> Unit,
     onSetupAiCore: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -339,11 +343,12 @@ private fun BackendPickerDialog(
                                     }
                                 }
                                 Text(row.explanation, style = MaterialTheme.typography.bodySmall)
-                                if (row.id == AiBackendCopy.API_KEY_PROVIDER_ID) {
-                                    TextButton(onClick = onManageKey, modifier = Modifier.padding(top = 2.dp)) {
+                                if (row.id == AiBackendCopy.API_KEY_PROVIDER_ID || row.id == AiBackendCopy.OPENROUTER_PROVIDER_ID) {
+                                    val configured = state.apiKeyConfiguredByProvider[row.id] == true
+                                    TextButton(onClick = { onManageKey(row.id) }, modifier = Modifier.padding(top = 2.dp)) {
                                         Icon(Icons.Filled.Key, contentDescription = null, modifier = Modifier.size(16.dp))
                                         Spacer(modifier = Modifier.size(4.dp))
-                                        Text(if (state.apiKeyConfigured) "Change API key" else "Add API key")
+                                        Text(if (configured) "Change API key" else "Add API key")
                                     }
                                 }
                                 if (row.id == AiBackendCopy.AICORE_PROVIDER_ID) {
@@ -421,6 +426,7 @@ private fun AiCoreSetupSection(
 
 @Composable
 private fun ApiKeyDialog(
+    providerDisplayName: String,
     alreadyConfigured: Boolean,
     onSave: (String) -> Unit,
     onClear: () -> Unit,
@@ -431,7 +437,7 @@ private fun ApiKeyDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(if (alreadyConfigured) "Change API key" else "Add your API key") },
+        title = { Text(if (alreadyConfigured) "Change your $providerDisplayName API key" else "Add your $providerDisplayName API key") },
         text = {
             Column {
                 Text(

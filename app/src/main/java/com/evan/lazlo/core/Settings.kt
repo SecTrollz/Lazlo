@@ -17,12 +17,14 @@ private val Context.dataStore by preferencesDataStore(name = "lazlo_settings")
 class Settings(private val context: Context) {
 
     sealed class AiChoice {
-        object ApiKey : AiChoice()
+        /** [providerId] picks which BYOK backend is active — "anthropic" or "openrouter" — each with its own stored key. */
+        data class ApiKey(val providerId: String = "anthropic") : AiChoice()
         object AiCore : AiChoice()
         data class LocalModel(val path: String) : AiChoice()
     }
 
     private val keyAiChoice = stringPreferencesKey("ai_choice")
+    private val keyApiKeyProviderId = stringPreferencesKey("api_key_provider_id")
     private val keyLocalModelPath = stringPreferencesKey("local_model_path")
     private val keyEngine = stringPreferencesKey("browser_engine")
     private val keyInspectorEnabled = stringPreferencesKey("inspector_enabled")
@@ -30,7 +32,10 @@ class Settings(private val context: Context) {
     suspend fun setAiChoice(choice: AiChoice) {
         context.dataStore.edit { prefs ->
             when (choice) {
-                is AiChoice.ApiKey -> prefs[keyAiChoice] = "api_key"
+                is AiChoice.ApiKey -> {
+                    prefs[keyAiChoice] = "api_key"
+                    prefs[keyApiKeyProviderId] = choice.providerId
+                }
                 is AiChoice.AiCore -> prefs[keyAiChoice] = "aicore"
                 is AiChoice.LocalModel -> {
                     prefs[keyAiChoice] = "local_model"
@@ -45,7 +50,10 @@ class Settings(private val context: Context) {
         return when (prefs[keyAiChoice]) {
             "aicore" -> AiChoice.AiCore
             "local_model" -> AiChoice.LocalModel(prefs[keyLocalModelPath] ?: "")
-            else -> AiChoice.ApiKey
+            // Missing keyApiKeyProviderId means an install from before
+            // OpenRouter existed — defaults to the original Anthropic
+            // backend, same as before this key existed.
+            else -> AiChoice.ApiKey(prefs[keyApiKeyProviderId] ?: "anthropic")
         }
     }
 

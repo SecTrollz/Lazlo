@@ -11,16 +11,23 @@ class AiBackendCopyTest {
     fun `each known backend has a distinct explanation`() {
         val explanations = listOf(
             AiBackendCopy.API_KEY_PROVIDER_ID,
+            AiBackendCopy.OPENROUTER_PROVIDER_ID,
             AiBackendCopy.AICORE_PROVIDER_ID,
             AiBackendCopy.MEDIAPIPE_PROVIDER_ID,
         ).map(AiBackendCopy::explanation)
-        assertEquals(3, explanations.toSet().size)
+        assertEquals(4, explanations.toSet().size)
     }
 
     @Test
-    fun `api key backend explanation mentions the network`() {
-        val text = AiBackendCopy.explanation(AiBackendCopy.API_KEY_PROVIDER_ID)
-        assertTrue(text.contains("your own", ignoreCase = true))
+    fun `both BYOK backends' explanations mention the network`() {
+        assertTrue(AiBackendCopy.explanation(AiBackendCopy.API_KEY_PROVIDER_ID).contains("your own", ignoreCase = true))
+        assertTrue(AiBackendCopy.explanation(AiBackendCopy.OPENROUTER_PROVIDER_ID).contains("your own", ignoreCase = true))
+    }
+
+    @Test
+    fun `each BYOK backend has a distinct service name`() {
+        assertEquals("Anthropic", AiBackendCopy.serviceName(AiBackendCopy.API_KEY_PROVIDER_ID))
+        assertEquals("OpenRouter", AiBackendCopy.serviceName(AiBackendCopy.OPENROUTER_PROVIDER_ID))
     }
 
     @Test
