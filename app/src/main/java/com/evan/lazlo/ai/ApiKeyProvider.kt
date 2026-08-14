@@ -12,6 +12,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okio.BufferedSource
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.IOException
 
 /**
  * Generic bring-your-own-key streaming client. Config (base URL, model
@@ -63,6 +64,16 @@ class ApiKeyProvider(
 
             override fun onResponse(call: Call, response: Response) {
                 response.use {
+                    if (!it.isSuccessful) {
+                        // Otherwise a bad key, a rate limit, or a malformed
+                        // request would silently look like an empty reply
+                        // instead of surfacing as the error it is — the
+                        // body often has a JSON error payload, but even a
+                        // truncated read of it beats no message at all.
+                        val detail = runCatching { it.body?.string() }.getOrNull()?.take(500)
+                        close(IOException("HTTP ${it.code} ${it.message}".trim() + (detail?.let { d -> ": $d" } ?: "")))
+                        return
+                    }
                     val source: BufferedSource? = it.body?.source()
                     while (source != null && !source.exhausted()) {
                         val line = source.readUtf8Line() ?: break

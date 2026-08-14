@@ -6,6 +6,10 @@
     <!-- Keeps the local inspector's VpnService/proxy alive while active. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- Lets the inspector's "capturing traffic" notification actually show
+         on API 33+; the service runs either way, this only controls whether
+         the user sees the persistent heads-up that it's active. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- No location, contacts, storage-wide, or other broad permissions. -->
 
     <application

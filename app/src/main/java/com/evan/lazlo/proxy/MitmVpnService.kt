@@ -1,8 +1,14 @@
 package com.evan.lazlo.proxy
 
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.net.VpnService
+import android.os.Build
 import android.os.ParcelFileDescriptor
+import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -22,6 +28,13 @@ import kotlinx.coroutines.launch
  * service's own outbound connections from being recaptured by its own
  * VPN routes — without it, every proxied connection would loop back
  * into itself.
+ *
+ * Declared in the manifest as a `specialUse` foreground service, which
+ * only takes effect once [android.app.Service.startForeground] is
+ * actually called here — the persistent "Lazlo is inspecting this
+ * device's traffic" notification below is both what that requires and,
+ * for a self-interception privacy tool, the honest thing to show
+ * whenever it's active rather than running it silently in the background.
  */
 class MitmVpnService : VpnService() {
 
@@ -30,6 +43,8 @@ class MitmVpnService : VpnService() {
     private var interceptor: TrafficInterceptor? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        startForegroundWithNotification()
+
         val ca = CertificateAuthority(this)
         val caCertificate = ca.ensureCaExists()
         val caPrivateKey = ca.caPrivateKey()
@@ -63,5 +78,51 @@ class MitmVpnService : VpnService() {
         vpnInterface?.close()
         vpnInterface = null
         super.onDestroy()
+    }
+
+    /**
+     * Promotes this service to a real foreground service with a visible,
+     * ongoing notification. This is required (not just polite) once the
+     * manifest declares `foregroundServiceType="specialUse"`: without an
+     * actual [android.app.Service.startForeground] call the OS still
+     * treats the process as a background service and can kill it under
+     * memory pressure or Doze the same as any other backgrounded service,
+     * despite the manifest scaffolding suggesting otherwise.
+     */
+    private fun startForegroundWithNotification() {
+        val manager = getSystemService(NotificationManager::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                NOTIFICATION_CHANNEL_ID,
+                "Traffic inspector",
+                NotificationManager.IMPORTANCE_LOW,
+            ).apply { description = "Shows while Lazlo is capturing this device's own traffic." }
+            manager.createNotificationChannel(channel)
+        }
+
+        val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_lock_lock)
+            .setContentTitle("Lazlo traffic inspector is on")
+            .setContentText("Capturing this device's own traffic only. Tap to review it in Lazlo.")
+            .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .build()
+
+        ServiceCompat.startForeground(
+            this,
+            NOTIFICATION_ID,
+            notification,
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            } else {
+                0
+            },
+        )
+    }
+
+    private companion object {
+        const val NOTIFICATION_CHANNEL_ID = "lazlo_traffic_inspector"
+        const val NOTIFICATION_ID = 1
     }
 }

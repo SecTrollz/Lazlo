@@ -70,19 +70,29 @@ included in backups.
 
 ## Project status
 
-All four modules are implemented, not stubbed: `MainActivity` wires a
-browser tab, engine picker, and inspector toggle together, and the
-Gradle project shell opens and builds cleanly in Android Studio. That
-now includes what were previously the two heaviest open pieces — the
-CA's Keystore-backed private key and the inspector's actual TUN packet
-pump + TLS-terminating relay (`proxy/net/`) — both real implementations
-with passing JVM unit tests for the parts that don't need a device.
+All four backend modules are implemented, not stubbed, and there's now a
+real UI on top of them instead of a placeholder single screen: three
+sections — **Chat**, **Browser**, **Inspector** — under a Material3
+bottom navigation bar, each wired to the module it fronts
+(`AiProviderFactory`, `BrowserEngine`, `TrafficLog`/`CertificateAuthority`
+respectively). The Gradle project shell opens and builds cleanly in
+Android Studio. That includes what were previously the two heaviest open
+backend pieces — the CA's Keystore-backed private key and the
+inspector's actual TUN packet pump + TLS-terminating relay
+(`proxy/net/`) — both real implementations with passing JVM unit tests
+for the parts that don't need a device, and the same is true of the new
+UI layer's pure logic (message-transcript folding, traffic-log
+formatting, address-bar URL/search resolution, and the plain-language
+backend/engine explanations are all unit tested; see
+[`ARCHITECTURE.md`](ARCHITECTURE.md#5-ui--the-three-screens)).
 
-What's *not* yet done is on-device validation of the VPN/TUN path
-itself (that can only be exercised on a real device or emulator, not in
-a build sandbox) — see [`ARCHITECTURE.md`](ARCHITECTURE.md#current-state)
-for the honest current-state breakdown before relying on the inspector
-for anything beyond development.
+What's *not* yet done is on-device validation — of the VPN/TUN path (as
+before) and now also of the Compose UI itself (layout, the live chat
+streaming path, the VPN-consent and certificate-install flows), none of
+which can be exercised on a real device or emulator from inside a build
+sandbox. See [`ARCHITECTURE.md`](ARCHITECTURE.md#current-state) for the
+honest current-state breakdown before relying on this for anything
+beyond development.
 
 ## Getting started
 
@@ -90,14 +100,18 @@ for anything beyond development.
    sync — it's a standard Gradle Android project (AGP 8.6, Kotlin 2.0,
    Compose). `./gradlew assembleDebug` builds cleanly from the command
    line too, and `./gradlew testDebugUnitTest` runs the JVM-level unit
-   tests (IPv4/TCP codec, CA/leaf certificate signing).
+   tests (IPv4/TCP codec, CA/leaf certificate signing, and the UI
+   layer's pure logic).
 2. Run the `app` module on a device or emulator running API 31+ (the
    AICore on-device provider's own client library sets that floor).
-3. In-app: pick a browser engine, optionally add an API key or point at
-   a local model file for chat, and toggle the inspector if you want to
-   see the app's own outbound traffic (this will prompt the standard
-   Android VPN-consent dialog and, separately, a certificate-install
-   step you have to approve yourself).
+3. In-app, use the three tabs at the bottom: **Chat** to pick/switch an
+   AI backend (add an API key, or use an on-device model) and talk to
+   it; **Browser** to pick an engine and browse, with a real address
+   bar; **Inspector** to turn traffic capture on (this prompts the
+   standard Android VPN-consent dialog) and install the local
+   certificate that lets it decrypt this device's own HTTPS traffic —
+   both steps you have to approve yourself, explained in-app before you
+   do.
 
 ## Permissions
 

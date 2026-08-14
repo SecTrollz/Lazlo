@@ -23,4 +23,15 @@ interface AiProvider {
 
     /** Streams the reply token-by-token; caller cancels the flow to abort. */
     fun streamChat(history: List<ChatMessage>): Flow<ChatToken>
+
+    /**
+     * Releases anything this provider is holding open — a loaded
+     * on-device model, mainly. No-op by default for stateless network
+     * providers like the BYOK client, which have nothing to release.
+     * Callers should invoke this when switching away from a provider or
+     * tearing down the screen that owns it, not just on process death:
+     * on-device models hold native memory that isn't freed until this
+     * runs.
+     */
+    fun close() {}
 }

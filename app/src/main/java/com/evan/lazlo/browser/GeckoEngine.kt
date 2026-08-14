@@ -17,8 +17,14 @@ import org.mozilla.geckoview.GeckoView
 class GeckoEngine(private val context: Context) : BrowserEngine {
 
     override val kind = EngineKind.GECKO
+    override var onUrlChanged: ((String) -> Unit)? = null
+    override var onLoadingChanged: ((Boolean) -> Unit)? = null
     private var geckoView: GeckoView? = null
     private var session: GeckoSession? = null
+
+    @Volatile private var lastKnownUrl: String? = null
+    @Volatile private var canGoBackState = false
+    @Volatile private var canGoForwardState = false
 
     companion object {
         @Volatile private var runtime: GeckoRuntime? = null
@@ -43,6 +49,34 @@ class GeckoEngine(private val context: Context) : BrowserEngine {
     override fun attach(container: ViewGroup) {
         val gv = GeckoView(context)
         val sess = GeckoSession(GeckoSessionSettings.Builder().usePrivateMode(true).build())
+        sess.navigationDelegate = object : GeckoSession.NavigationDelegate {
+            override fun onLocationChange(
+                session: GeckoSession,
+                url: String?,
+                perms: MutableList<GeckoSession.PermissionDelegate.ContentPermission>,
+                hasUserGesture: Boolean,
+            ) {
+                lastKnownUrl = url
+                url?.let { onUrlChanged?.invoke(it) }
+            }
+
+            override fun onCanGoBack(session: GeckoSession, canGoBack: Boolean) {
+                canGoBackState = canGoBack
+            }
+
+            override fun onCanGoForward(session: GeckoSession, canGoForward: Boolean) {
+                canGoForwardState = canGoForward
+            }
+        }
+        sess.progressDelegate = object : GeckoSession.ProgressDelegate {
+            override fun onPageStart(session: GeckoSession, url: String) {
+                onLoadingChanged?.invoke(true)
+            }
+
+            override fun onPageStop(session: GeckoSession, success: Boolean) {
+                onLoadingChanged?.invoke(false)
+            }
+        }
         sess.open(runtime(context))
         gv.setSession(sess)
         geckoView = gv
@@ -51,9 +85,22 @@ class GeckoEngine(private val context: Context) : BrowserEngine {
     }
 
     override fun loadUrl(url: String) { session?.loadUri(url) }
-    override fun goBack(): Boolean { session?.goBack(); return true }
-    override fun goForward(): Boolean { session?.goForward(); return true }
-    override fun currentUrl(): String? = null // read via NavigationDelegate.onLocationChange in a full impl
+
+    override fun goBack(): Boolean {
+        if (!canGoBackState) return false
+        session?.goBack()
+        return true
+    }
+
+    override fun goForward(): Boolean {
+        if (!canGoForwardState) return false
+        session?.goForward()
+        return true
+    }
+
+    override fun canGoBack(): Boolean = canGoBackState
+    override fun canGoForward(): Boolean = canGoForwardState
+    override fun currentUrl(): String? = lastKnownUrl
 
     override fun setProxy(host: String, port: Int) {
         // Also routed at the VpnService layer; GeckoRuntimeSettings has no

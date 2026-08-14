@@ -25,7 +25,10 @@ com.evan.lazlo/
 ├── ai/            AiProvider interface + 3 implementations + factory
 ├── browser/       BrowserEngine interface + WebView/GeckoView impls
 ├── proxy/         Local VpnService-backed MITM inspector + CA management
-└── core/          Settings (DataStore), Keystore-backed secret storage
+├── core/          Settings (DataStore), Keystore-backed secret storage
+└── ui/            Compose UI: three screens + their ViewModels, tied
+                   together by a bottom-nav Scaffold (MainActivity itself
+                   is just a one-line host for this)
 ```
 
 ### 1. `ai/` — pluggable model backend
@@ -118,10 +121,18 @@ Standard on-device MITM pattern, same one ProxyPin/HttpCanary/PCAPdroid use:
 4. **MitmVpnService** — the local-loopback `VpnService` that owns the TUN
    interface and drives `TcpIpStack`'s `pump()`/`shutdown()` across its
    lifecycle. TLS is terminated locally only — nothing is forwarded to
-   any third-party relay.
+   any third-party relay. It promotes itself to a real foreground
+   service with an ongoing "Lazlo is inspecting this device's traffic"
+   notification the moment it starts — both because the manifest's
+   `foregroundServiceType="specialUse"` declaration only actually takes
+   effect once `startForeground()` is called (skipping it left the
+   service exposed to normal background-service limits despite looking
+   like a foreground service on paper), and because a self-interception
+   privacy tool should never run invisibly.
 5. **Traffic log** — in-memory ring buffer (optionally persisted to an
    encrypted local Room DB, off by default) of method/host/path/status/
-   size, viewable in a Compose screen. No export path unless the user
+   size, viewable in the Inspector tab (`ui/inspector/InspectorScreen.kt`).
+   No export path unless the user
    explicitly taps "export" (writes a local file, no network send).
 
 This only intercepts traffic from the device it runs on, and only after
@@ -152,6 +163,69 @@ off-device pass.
   `EncryptedSharedPreferences`, never in DataStore, never in plaintext
   files, never synced to backup (`android:allowBackup="false"` and
   `excludeAppDataFromAutoBackup` set on the secrets directory).
+
+### 5. `ui/` — the three screens
+
+`MainActivity` does nothing but set `LazloTheme { LazloApp() }` as its
+Compose content; everything a user actually sees lives under `ui/`,
+split by section rather than crammed into the Activity:
+
+```
+ui/
+├── LazloApp.kt              Scaffold: branded TopAppBar + bottom
+│                            NavigationBar switching between the three
+│                            tabs below (LazloTab enum)
+├── theme/LazloTheme.kt      Material3 color schemes (light/dark), sampled
+│                            from the same brand colors as the launcher icon
+├── chat/
+│   ├── ChatScreen.kt        Transcript, input row, empty/loading/error
+│   │                        states, the backend-picker and API-key dialogs
+│   ├── ChatViewModel.kt     Owns the active AiProvider (via
+│   │                        AiProviderFactory), streams replies, persists
+│   │                        the backend choice via Settings/SecretStore
+│   ├── ChatTranscript.kt    Pure list-editing helpers (append/stream/drop)
+│   │                        — unit tested without Compose or Android
+│   └── AiBackendCopy.kt     The plain-language, one-line explanation of
+│                            each backend — pure, unit tested
+├── browser/
+│   ├── BrowserScreen.kt     Address bar, back/forward/reload, the engine
+│   │                        picker (relocated here from the old toggle
+│   │                        row), the AndroidView hosting whichever
+│   │                        BrowserEngine is selected
+│   ├── BrowserViewModel.kt  Persists engine choice, tracks address bar /
+│   │                        current URL / loading / can-go-back-or-forward
+│   ├── UrlBarInput.kt       Pure "is this a URL or a search" resolver —
+│   │                        unit tested
+│   └── BrowserEngineCopy.kt Plain-language engine explanations — pure,
+│                            unit tested
+└── inspector/
+    ├── InspectorScreen.kt   On/off switch, the "why a certificate" card
+    │                        with the install action, the live traffic list
+    │                        and its empty state
+    ├── InspectorViewModel.kt Persists the toggle, generates the CA off
+    │                        the main thread, exposes TrafficLog.entries
+    └── TrafficFormat.kt     Pure relative-time/byte-size/status formatting
+                             for the traffic list — unit tested
+```
+
+Each screen's ViewModel is an `AndroidViewModel` constructed through a
+small hand-written `ViewModelProvider.Factory` (no DI framework in this
+project) and talks only to the same `ai`/`browser`/`proxy`/`core`
+interfaces documented above — the UI layer doesn't reach around them.
+Switching tabs doesn't lose state: each screen's ViewModel is hoisted at
+the `viewModel()` call site tied to that screen's own composition, and
+persisted choices (engine, AI backend, inspector on/off) round-trip
+through `Settings`/`SecretStore` the same way the old single-screen
+version did.
+
+One deliberate trade-off: switching *away from* the Browser tab and back
+tears down and recreates the underlying WebView/GeckoView (it's a native
+Android `View`, not a Composable — Compose disposes it like any other
+view leaving composition). `BrowserViewModel` remembers the last URL so
+the recreated engine reopens the same page, but in-page scroll position
+and browser history are lost on a round trip through another tab. Fixing
+that fully (keeping all three tabs' native views alive simultaneously,
+just hidden) is a reasonable follow-up, not done here.
 
 ## Permissions
 
@@ -202,16 +276,19 @@ Two things worth knowing about the above, both already handled in
 
 ## Current state
 
-This repository holds the four modules with their interfaces and a
-working implementation per class, a `MainActivity` that wires a
-`BrowserEngine` tab, the engine/inspector toggles, and the VPN-consent
-flow together, and the Gradle project shell needed to open and build it
-in Android Studio. `./gradlew assembleDebug` succeeds against this tree
-(compileSdk 35, minSdk 31), and `./gradlew testDebugUnitTest` runs and
-passes the JVM-level unit tests under `app/src/test/` (the IPv4/TCP
-codec and the CA/leaf certificate-signing logic).
+This repository holds the four backend modules with their interfaces
+and a working implementation per class, plus a real three-screen `ui/`
+layer (chat / browser / traffic inspector, tied together by a bottom
+`NavigationBar`) that actually surfaces all of it — `MainActivity` is a
+one-line Compose host, not where the app's logic lives. `gradle
+:app:assembleDebug` succeeds against this tree (compileSdk 35, minSdk
+31), and `gradle :app:testDebugUnitTest` runs and passes the JVM-level
+unit tests under `app/src/test/`: the IPv4/TCP codec, the CA/leaf
+certificate-signing logic, and the `ui/` layer's pure logic (chat
+transcript folding, traffic-log formatting, address-bar URL/search
+resolution, the backend/engine explainer copy).
 
-What were previously the two heaviest documented skeletons are now real
+What were previously the two heaviest documented skeletons are real
 implementations, not stubs:
 
 - **`CertificateAuthority`'s Keystore-backed private key** — the CA's
@@ -232,3 +309,19 @@ the loopback TLS bridge under real traffic. Treat those as implemented
 but **not yet validated on-device**, and budget for an on-device pass
 (a real HTTPS request through the inspector, watched in Android Studio's
 debugger/logcat) before trusting this for anything beyond development.
+
+**On the `ui/` layer specifically:** the Compose screens compile clean
+and their pure logic (the parts factored out into plain Kotlin
+objects — `ChatTranscript`, `TrafficFormat`, `UrlBarInput`, the copy
+objects) has JVM unit test coverage. The Composables and ViewModels
+themselves do not — Compose UI needs an emulator/device or a
+`compose-ui-test`/Robolectric harness to exercise for real, neither of
+which is set up in this project yet, so layout, the actual chat
+streaming path against a live backend, the VPN-consent dialog flow, and
+the certificate-install intent have only been checked by code review and
+by confirming the app builds against the real library APIs (every
+non-obvious signature — GeckoView's delegate callbacks, AICore's and
+MediaPipe's generation APIs, `ViewModelProvider.Factory`,
+`ServiceCompat.startForeground`, etc. — was checked against the actual
+jars this project depends on, not assumed). Budget an on-device pass for
+the UI the same way the inspector's packet pump already calls for one.

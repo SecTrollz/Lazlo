@@ -14,6 +14,8 @@ import android.webkit.WebViewClient
 class ChromiumEngine(private val context: Context) : BrowserEngine {
 
     override val kind = EngineKind.CHROMIUM
+    override var onUrlChanged: ((String) -> Unit)? = null
+    override var onLoadingChanged: ((Boolean) -> Unit)? = null
     private var webView: WebView? = null
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -23,7 +25,17 @@ class ChromiumEngine(private val context: Context) : BrowserEngine {
             settings.domStorageEnabled = true
             settings.cacheMode = WebSettings.LOAD_NO_CACHE
             settings.safeBrowsingEnabled = true
-            webViewClient = WebViewClient()
+            webViewClient = object : WebViewClient() {
+                override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
+                    onLoadingChanged?.invoke(true)
+                    onUrlChanged?.invoke(url)
+                }
+
+                override fun onPageFinished(view: WebView, url: String) {
+                    onLoadingChanged?.invoke(false)
+                    onUrlChanged?.invoke(url)
+                }
+            }
         }
         webView = wv
         container.addView(wv, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
@@ -32,6 +44,8 @@ class ChromiumEngine(private val context: Context) : BrowserEngine {
     override fun loadUrl(url: String) { webView?.loadUrl(url) }
     override fun goBack(): Boolean = webView?.let { if (it.canGoBack()) { it.goBack(); true } else false } ?: false
     override fun goForward(): Boolean = webView?.let { if (it.canGoForward()) { it.goForward(); true } else false } ?: false
+    override fun canGoBack(): Boolean = webView?.canGoBack() ?: false
+    override fun canGoForward(): Boolean = webView?.canGoForward() ?: false
     override fun currentUrl(): String? = webView?.url
 
     override fun setProxy(host: String, port: Int) {

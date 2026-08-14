@@ -43,4 +43,10 @@ class AiCoreProvider(private val context: Context) : AiProvider {
         }
         emit(ChatToken("", isFinal = true))
     }
+
+    /** Frees the native model resources AICore allocated for [model]; safe to call even if it was never loaded. */
+    override fun close() {
+        model?.close()
+        model = null
+    }
 }

@@ -30,6 +30,16 @@ class AiProviderFactory(
             add(AiCoreProvider(context))
             if (localModelPath != null) add(MediaPipeProvider(context, localModelPath))
         }
-        return candidates.filter { it.isReady() || it.id == "anthropic" } // API key can be entered later
+        val ready = candidates.associateWith { it.isReady() }
+        // These candidates exist only to answer "is this backend usable
+        // right now" — an actual chat session always asks provider() for
+        // a fresh instance instead of reusing one of these. Without this,
+        // every call here would silently leave an on-device model
+        // (AiCoreProvider's GenerativeModel, MediaPipeProvider's
+        // LlmInference) loaded and never released. Both providers reload
+        // lazily on their next isReady()/streamChat() call, so closing
+        // them here doesn't make them any less usable afterwards.
+        candidates.forEach { it.close() }
+        return candidates.filter { ready.getValue(it) || it.id == "anthropic" } // API key can be entered later
     }
 }

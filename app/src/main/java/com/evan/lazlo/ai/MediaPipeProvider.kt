@@ -56,4 +56,10 @@ class MediaPipeProvider(
         e.generateResponseAsync(prompt)
         awaitClose { activeListener = null }
     }
+
+    /** Frees the native inference engine backing [engine]; safe to call even if a model was never loaded. */
+    override fun close() {
+        engine?.close()
+        engine = null
+    }
 }
