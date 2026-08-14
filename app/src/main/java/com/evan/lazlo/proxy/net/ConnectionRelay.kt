@@ -65,6 +65,15 @@ import io.netty.channel.Channel as NettyChannel
  * that's [protectSocket]-protected *before* Netty connects it, so the
  * interceptor's own upstream traffic isn't recaptured by the VPN's own
  * routes.
+ *
+ * Every decrypted request/response chunk on :443 and :80 is also run
+ * through [RewriteEngine] against the caller-supplied [RewriteRule]s —
+ * this is what turns the inspector from a read-only viewer into an
+ * active MITM: a matching rule can set/remove a header or find/replace
+ * the body before the bytes ever reach their destination (for a
+ * request) or the app (for a response). An empty rule list — the
+ * default — costs nothing extra; [RewriteEngine] short-circuits before
+ * touching a single byte.
  */
 internal class ConnectionRelay(private val eventLoopGroup: NioEventLoopGroup) {
 
@@ -80,10 +89,12 @@ internal class ConnectionRelay(private val eventLoopGroup: NioEventLoopGroup) {
         caCertificate: X509Certificate,
         sendToClient: suspend (ByteArray) -> Unit,
         onHttpExchange: (TrafficEntry) -> Unit,
+        /** Live snapshot of the user's rewrite rules, resolved once per flow — see [RewriteEngine]. Empty means every byte passes through exactly as before this feature existed. */
+        rules: List<RewriteRule> = emptyList(),
     ) {
         when (destinationPort) {
-            443 -> relayTls(flow, destinationAddress, destinationPort, protectSocket, leafCertificateFactory, caCertificate, sendToClient, onHttpExchange)
-            80 -> relayPlain(flow, destinationAddress, destinationPort, protectSocket, sendToClient, onHttpExchange)
+            443 -> relayTls(flow, destinationAddress, destinationPort, protectSocket, leafCertificateFactory, caCertificate, sendToClient, onHttpExchange, rules)
+            80 -> relayPlain(flow, destinationAddress, destinationPort, protectSocket, sendToClient, onHttpExchange, rules)
             else -> relayPassthrough(flow, destinationAddress, destinationPort, protectSocket, sendToClient)
         }
     }
@@ -104,12 +115,14 @@ internal class ConnectionRelay(private val eventLoopGroup: NioEventLoopGroup) {
         caCertificate: X509Certificate,
         sendToClient: suspend (ByteArray) -> Unit,
         onHttpExchange: (TrafficEntry) -> Unit,
+        rules: List<RewriteRule>,
     ) = coroutineScope {
         val fallbackHost = destinationAddress.joinToString(".") { (it.toInt() and 0xFF).toString() }
         val requestSniffer = HttpLineSniffer()
         val responseSniffer = HttpLineSniffer()
         var bytesTotal = 0L
         var loggedHost = fallbackHost
+        var firstRequestBytes: ByteArray? = null
 
         val localAddress = LocalAddress("lazlo-mitm-${localFlowIds.incrementAndGet()}")
         val sniResolved = CompletableDeferred<String>()
@@ -142,6 +155,7 @@ internal class ConnectionRelay(private val eventLoopGroup: NioEventLoopGroup) {
                                 msg.readBytes(bytes)
                                 msg.release()
                                 requestSniffer.feed(bytes, bytes.size)
+                                if (firstRequestBytes == null) firstRequestBytes = bytes
                                 bytesTotal += bytes.size
                                 decryptedFromClient.trySend(bytes)
                             } else {
@@ -223,17 +237,21 @@ internal class ConnectionRelay(private val eventLoopGroup: NioEventLoopGroup) {
             upstream = connectedUpstream
 
             val clientToUpstream = launch(Dispatchers.Default) {
-                for (bytes in decryptedFromClient) connectedUpstream.writeAndFlush(Unpooled.wrappedBuffer(bytes))
+                for (bytes in decryptedFromClient) {
+                    val rewritten = RewriteEngine.rewriteRequest(bytes, resolvedHost, rules)
+                    connectedUpstream.writeAndFlush(Unpooled.wrappedBuffer(rewritten))
+                }
             }
             val upstreamToClient = launch(Dispatchers.Default) {
                 for (bytes in upstreamResponses) {
                     responseSniffer.feed(bytes, bytes.size)
                     bytesTotal += bytes.size
+                    val rewritten = RewriteEngine.rewriteResponse(bytes, resolvedHost, rules)
                     // Writing plaintext out through the accepted (server)
                     // channel re-encrypts it via its SslHandler; the
                     // result flows back through the local pair to
                     // bridgeChannel's inbound side above.
-                    acceptedChannel.writeAndFlush(Unpooled.wrappedBuffer(bytes))
+                    acceptedChannel.writeAndFlush(Unpooled.wrappedBuffer(rewritten))
                 }
             }
 
@@ -245,7 +263,7 @@ internal class ConnectionRelay(private val eventLoopGroup: NioEventLoopGroup) {
             runCatching { upstream?.close() }
             runCatching { bridgeChannel.close() }
             runCatching { acceptedChannel.close() }
-            logExchange(onHttpExchange, loggedHost, requestSniffer.requestLine, responseSniffer.statusCode, bytesTotal)
+            logExchange(onHttpExchange, "https", loggedHost, requestSniffer.requestLine, responseSniffer.statusCode, bytesTotal, firstRequestBytes)
         }
     }
 
@@ -264,11 +282,13 @@ internal class ConnectionRelay(private val eventLoopGroup: NioEventLoopGroup) {
         protectSocket: (Socket) -> Boolean,
         sendToClient: suspend (ByteArray) -> Unit,
         onHttpExchange: (TrafficEntry) -> Unit,
+        rules: List<RewriteRule>,
     ) = coroutineScope {
         val host = destinationAddress.joinToString(".") { (it.toInt() and 0xFF).toString() }
         val requestSniffer = HttpLineSniffer()
         val responseSniffer = HttpLineSniffer()
         var bytesTotal = 0L
+        var firstRequestBytes: ByteArray? = null
 
         val fromUpstream = Channel<ByteArray>(Channel.UNLIMITED)
         val upstream = connectUpstream(destinationAddress, destinationPort, protectSocket, null, null, fromUpstream)
@@ -276,22 +296,25 @@ internal class ConnectionRelay(private val eventLoopGroup: NioEventLoopGroup) {
             val toUpstream = launch(Dispatchers.Default) {
                 for (chunk in flow.fromClient) {
                     requestSniffer.feed(chunk, chunk.size)
+                    if (firstRequestBytes == null) firstRequestBytes = chunk
                     bytesTotal += chunk.size
-                    upstream.writeAndFlush(Unpooled.wrappedBuffer(chunk))
+                    val rewritten = RewriteEngine.rewriteRequest(chunk, host, rules)
+                    upstream.writeAndFlush(Unpooled.wrappedBuffer(rewritten))
                 }
             }
             val toClient = launch(Dispatchers.Default) {
                 for (bytes in fromUpstream) {
                     responseSniffer.feed(bytes, bytes.size)
                     bytesTotal += bytes.size
-                    sendToClient(bytes)
+                    val rewritten = RewriteEngine.rewriteResponse(bytes, host, rules)
+                    sendToClient(rewritten)
                 }
             }
             toUpstream.join()
             toClient.join()
         } finally {
             runCatching { upstream.close() }
-            logExchange(onHttpExchange, host, requestSniffer.requestLine, responseSniffer.statusCode, bytesTotal)
+            logExchange(onHttpExchange, "http", host, requestSniffer.requestLine, responseSniffer.statusCode, bytesTotal, firstRequestBytes)
         }
     }
 
@@ -401,10 +424,19 @@ internal class ConnectionRelay(private val eventLoopGroup: NioEventLoopGroup) {
         deferred.await()
     }
 
-    private fun logExchange(onHttpExchange: (TrafficEntry) -> Unit, host: String, requestLine: String?, statusCode: Int?, bytes: Long) {
+    private fun logExchange(
+        onHttpExchange: (TrafficEntry) -> Unit,
+        scheme: String,
+        host: String,
+        requestLine: String?,
+        statusCode: Int?,
+        bytes: Long,
+        firstRequestBytes: ByteArray?,
+    ) {
         val parts = requestLine?.split(' ')
         val method = parts?.getOrNull(0) ?: "?"
         val path = parts?.getOrNull(1) ?: ""
-        onHttpExchange(TrafficEntry(method = method, host = host, path = path, status = statusCode, bytes = bytes))
+        val replay = firstRequestBytes?.let { RewriteEngine.captureForReplay(it, scheme, host) }
+        onHttpExchange(TrafficEntry(method = method, host = host, path = path, status = statusCode, bytes = bytes, replay = replay))
     }
 }

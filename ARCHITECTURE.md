@@ -251,6 +251,42 @@ Standard on-device MITM pattern, same one ProxyPin/HttpCanary/PCAPdroid use:
    size, viewable in the Inspector tab (`ui/inspector/InspectorScreen.kt`).
    No export path unless the user
    explicitly taps "export" (writes a local file, no network send).
+6. **Active control: rewrite rules + replay** — the inspector isn't
+   read-only. `RewriteEngine` (`proxy/net/RewriteEngine.kt`) decodes
+   every request/response chunk that passes through `ConnectionRelay`
+   into a real `FullHttpRequest`/`FullHttpResponse` (Netty's
+   `netty-codec-http`, not regex-on-bytes) and applies every matching,
+   enabled `RewriteRule` — set/remove a header, find/replace body text —
+   before forwarding, re-encoding the result and fixing `Content-Length`
+   if the body size changed. Rules are user-defined and persisted
+   (`RewriteRuleStore`, DataStore/JSON like everything else non-secret),
+   managed from the Inspector tab. **Fails open, always**: anything that
+   isn't a complete, well-formed single HTTP message in that chunk — a
+   body split across TCP segments, HTTP/2, a decode error — passes
+   through byte-for-byte unmodified rather than risk forwarding
+   corrupted traffic; an empty rule list costs nothing, `RewriteEngine`
+   short-circuits before touching a byte. **Verified against real HTTP
+   byte layouts**, not mocked objects: `RewriteEngineTest` builds actual
+   request/response bytes, runs them through the engine, and checks the
+   re-encoded output — including that a body edit correctly updates
+   `Content-Length`, and that malformed input passes through unchanged.
+   Every captured request is also decoded into a `ReplayableRequest`
+   (method, URL, headers, body) regardless of whether any rule matches —
+   that's what backs the traffic log's **Replay** action
+   (`InspectorViewModel.replay`), which resends it via OkHttp over the
+   app's own normal network stack; if the inspector's CA is trusted
+   (see `network_security_config.xml`'s note on trusting user CAs), the
+   replay's own request/response shows up in the log too, same as any
+   other traffic.
+
+   `RewriteEngine` uses Netty's `EmbeddedChannel` deliberately, unlike
+   the rest of `proxy/net/` (see the `LocalChannel` note below for why
+   it was rejected *there*): this is a different shape of problem — one
+   call in, one call out, entirely on the calling coroutine, discarded
+   immediately after, never touched by a second producer or consumer.
+   That's exactly the synchronous, single-caller use `EmbeddedChannel`
+   is built for; the earlier rejection was specifically about forcing a
+   *long-lived, concurrently-fed* stream through it.
 
 This only intercepts traffic from the device it runs on, and only after
 the user installs the generated CA themselves — it can't be pointed at
@@ -432,6 +468,9 @@ dependencies {
     implementation "io.netty:netty-transport:4.1.110.Final"
     implementation "io.netty:netty-codec:4.1.110.Final"
     implementation "io.netty:netty-handler:4.1.110.Final"
+    // Real HTTP/1.x request/response decode+encode for RewriteEngine's
+    // rewrite rules — not regex-on-bytes.
+    implementation "io.netty:netty-codec-http:4.1.110.Final"
     implementation "org.bouncycastle:bcpkix-jdk18on:1.78.1"
 }
 ```
@@ -479,13 +518,15 @@ one-line Compose host, not where the app's logic lives. `gradle
 31) and now also builds `:dynamic-features:gecko_engine` as a genuinely
 separate on-demand module (confirmed by inspecting the resulting base
 APK's contents, not just by the build succeeding). `gradle
-:app:testDebugUnitTest` runs and passes 73 JVM-level unit tests under
+:app:testDebugUnitTest` runs and passes 85 JVM-level unit tests under
 `app/src/test/`: the IPv4/TCP codec, the CA/leaf certificate-signing
 logic, a real end-to-end TLS handshake against the Netty MITM pipeline
 (`NettyTlsTerminationTest`), the DNS question-name decoder
-(`DnsMessageTest`), AICore's error-code-to-plain-language diagnosis
-(`AiCoreDiagnosisTest`), the Anthropic/OpenRouter BYOK request and
-response shaping (`ApiKeyProviderConfigTest`), the browser history/
+(`DnsMessageTest`), the rewrite-rules engine against real HTTP byte
+layouts (`RewriteEngineTest`) and its rule persistence codec
+(`RewriteRuleCodecTest`), AICore's error-code-to-plain-language
+diagnosis (`AiCoreDiagnosisTest`), the Anthropic/OpenRouter BYOK request
+and response shaping (`ApiKeyProviderConfigTest`), the browser history/
 bookmarks/downloads JSON codec (`BrowserRecordCodecTest`), and the
 `ui/` layer's pure logic (chat transcript folding, traffic-log
 formatting, address-bar URL/search resolution, the backend/engine

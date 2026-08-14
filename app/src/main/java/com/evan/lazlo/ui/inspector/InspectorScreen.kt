@@ -17,8 +17,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Replay
 import androidx.compose.material.icons.filled.Screenshot
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material3.Card
@@ -28,8 +30,10 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -42,7 +46,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
 import com.evan.lazlo.proxy.TrafficEntry
+import com.evan.lazlo.proxy.net.RewriteRule
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.time.Instant
@@ -169,6 +175,40 @@ fun InspectorScreen(
             }
         }
 
+        Spacer(modifier = Modifier.size(12.dp))
+
+        Card(modifier = Modifier.fillMaxWidth(), onClick = { viewModel.setShowRewriteRules(true) }) {
+            Row(
+                modifier = Modifier.padding(16.dp).fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.Filled.Bolt, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                Spacer(modifier = Modifier.size(8.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Rewrite rules", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        if (state.rewriteRules.isEmpty()) {
+                            "None yet — the inspector is read-only until you add one."
+                        } else {
+                            "${state.rewriteRules.count { it.enabled }} of ${state.rewriteRules.size} active"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                TextButton(onClick = { viewModel.setShowRewriteRules(true) }) { Text("Manage") }
+            }
+        }
+
+        state.lastReplayResult?.let { message ->
+            Spacer(modifier = Modifier.size(8.dp))
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer), modifier = Modifier.fillMaxWidth()) {
+                Row(modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(message, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+                    TextButton(onClick = viewModel::dismissReplayResult) { Text("Dismiss") }
+                }
+            }
+        }
+
         Spacer(modifier = Modifier.size(16.dp))
 
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
@@ -190,10 +230,25 @@ fun InspectorScreen(
             }
             LazyColumn(modifier = Modifier.fillMaxSize()) {
                 items(state.entries.asReversed()) { entry ->
-                    TrafficRow(entry = entry, now = now)
+                    TrafficRow(
+                        entry = entry,
+                        now = now,
+                        replaying = state.replayingUrl == entry.replay?.url,
+                        onReplay = { viewModel.replay(entry) },
+                    )
                 }
             }
         }
+    }
+
+    if (state.showRewriteRules) {
+        RewriteRulesDialog(
+            rules = state.rewriteRules,
+            onSave = viewModel::saveRewriteRule,
+            onDelete = viewModel::deleteRewriteRule,
+            onSetEnabled = viewModel::setRewriteRuleEnabled,
+            onDismiss = { viewModel.setShowRewriteRules(false) },
+        )
     }
 }
 
@@ -227,7 +282,7 @@ private fun EmptyTrafficState(inspectorEnabled: Boolean) {
 }
 
 @Composable
-private fun TrafficRow(entry: TrafficEntry, now: Instant) {
+private fun TrafficRow(entry: TrafficEntry, now: Instant, replaying: Boolean, onReplay: () -> Unit) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -258,19 +313,218 @@ private fun TrafficRow(entry: TrafficEntry, now: Instant) {
                     maxLines = 1,
                 )
             }
-            Row(modifier = Modifier.padding(top = 4.dp)) {
+            Row(modifier = Modifier.padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     TrafficFormat.humanBytes(entry.bytes),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                Spacer(modifier = Modifier.weight(1f))
+                Spacer(modifier = Modifier.size(8.dp))
                 Text(
                     TrafficFormat.relativeTime(entry.timestamp, now),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                Spacer(modifier = Modifier.weight(1f))
+                if (entry.replay != null) {
+                    if (replaying) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                    } else {
+                        IconButton(onClick = onReplay, modifier = Modifier.size(28.dp)) {
+                            Icon(Icons.Filled.Replay, contentDescription = "Replay this request", modifier = Modifier.size(18.dp))
+                        }
+                    }
+                }
             }
         }
+    }
+}
+
+/**
+ * Rule management for the "control" half of the inspector: what's
+ * active, an inline add-rule form, and a delete/enable toggle per rule.
+ * A rule with neither a header action nor a body find/replace set is
+ * accepted but does nothing — [com.evan.lazlo.proxy.net.RewriteEngine]
+ * simply skips it — so a rule mid-edit here can't corrupt live traffic.
+ */
+@Composable
+private fun RewriteRulesDialog(
+    rules: List<RewriteRule>,
+    onSave: (RewriteRule) -> Unit,
+    onDelete: (String) -> Unit,
+    onSetEnabled: (String, Boolean) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var showAddForm by remember { mutableStateOf(false) }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+            Column(modifier = Modifier.padding(20.dp)) {
+                Text("Rewrite rules", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "Applied live to matching requests/responses as they pass through the inspector — set or remove a header, or find/replace text in the body.",
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(top = 4.dp, bottom = 12.dp),
+                )
+                if (rules.isEmpty()) {
+                    Text("No rules yet.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(bottom = 8.dp))
+                } else {
+                    rules.forEach { rule ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    rule.label.ifBlank { rule.hostContains.ifBlank { "Any host" } },
+                                    style = MaterialTheme.typography.bodyMedium,
+                                )
+                                Text(ruleSummary(rule), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            Switch(checked = rule.enabled, onCheckedChange = { onSetEnabled(rule.id, it) })
+                            IconButton(onClick = { onDelete(rule.id) }) {
+                                Icon(Icons.Filled.DeleteOutline, contentDescription = "Delete this rule")
+                            }
+                        }
+                    }
+                }
+
+                if (showAddForm) {
+                    AddRewriteRuleForm(
+                        onSave = { rule ->
+                            onSave(rule)
+                            showAddForm = false
+                        },
+                        onCancel = { showAddForm = false },
+                    )
+                } else {
+                    TextButton(onClick = { showAddForm = true }, modifier = Modifier.padding(top = 8.dp)) {
+                        Text("+ Add a rule")
+                    }
+                }
+
+                TextButton(onClick = onDismiss, modifier = Modifier.padding(top = 8.dp)) { Text("Close") }
+            }
+        }
+    }
+}
+
+private fun ruleSummary(rule: RewriteRule): String {
+    val parts = buildList {
+        if (!rule.setHeaderName.isNullOrBlank()) add("set ${rule.setHeaderName}")
+        if (!rule.removeHeaderName.isNullOrBlank()) add("remove ${rule.removeHeaderName}")
+        if (!rule.bodyFind.isNullOrEmpty()) add("replace body text")
+        if (rule.appliesToRequest) add("on request")
+        if (rule.appliesToResponse) add("on response")
+    }
+    return if (parts.isEmpty()) "Does nothing yet" else parts.joinToString(" · ")
+}
+
+@Composable
+private fun AddRewriteRuleForm(onSave: (RewriteRule) -> Unit, onCancel: () -> Unit) {
+    var label by remember { mutableStateOf("") }
+    var hostContains by remember { mutableStateOf("") }
+    var appliesToRequest by remember { mutableStateOf(true) }
+    var appliesToResponse by remember { mutableStateOf(false) }
+    var setHeaderName by remember { mutableStateOf("") }
+    var setHeaderValue by remember { mutableStateOf("") }
+    var removeHeaderName by remember { mutableStateOf("") }
+    var bodyFind by remember { mutableStateOf("") }
+    var bodyReplace by remember { mutableStateOf("") }
+
+    Column(modifier = Modifier.padding(top = 8.dp)) {
+        OutlinedTextField(
+            value = label,
+            onValueChange = { label = it },
+            label = { Text("Label (optional)") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        OutlinedTextField(
+            value = hostContains,
+            onValueChange = { hostContains = it },
+            label = { Text("Host contains (blank = any host)") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+        )
+        Row(modifier = Modifier.padding(top = 8.dp)) {
+            FilterChipLike("Request", appliesToRequest) { appliesToRequest = !appliesToRequest }
+            Spacer(modifier = Modifier.size(8.dp))
+            FilterChipLike("Response", appliesToResponse) { appliesToResponse = !appliesToResponse }
+        }
+        OutlinedTextField(
+            value = setHeaderName,
+            onValueChange = { setHeaderName = it },
+            label = { Text("Set header name") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+        )
+        OutlinedTextField(
+            value = setHeaderValue,
+            onValueChange = { setHeaderValue = it },
+            label = { Text("Set header value") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+        )
+        OutlinedTextField(
+            value = removeHeaderName,
+            onValueChange = { removeHeaderName = it },
+            label = { Text("Remove header name") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+        )
+        OutlinedTextField(
+            value = bodyFind,
+            onValueChange = { bodyFind = it },
+            label = { Text("Body: find text") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+        )
+        OutlinedTextField(
+            value = bodyReplace,
+            onValueChange = { bodyReplace = it },
+            label = { Text("Body: replace with") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+        )
+        Row(modifier = Modifier.padding(top = 12.dp)) {
+            TextButton(onClick = onCancel) { Text("Cancel") }
+            Spacer(modifier = Modifier.weight(1f))
+            TextButton(onClick = {
+                onSave(
+                    RewriteRule(
+                        id = java.util.UUID.randomUUID().toString(),
+                        enabled = true,
+                        label = label.trim(),
+                        hostContains = hostContains.trim(),
+                        appliesToRequest = appliesToRequest,
+                        appliesToResponse = appliesToResponse,
+                        setHeaderName = setHeaderName.trim().takeIf { it.isNotEmpty() },
+                        setHeaderValue = setHeaderValue.takeIf { setHeaderName.isNotBlank() },
+                        removeHeaderName = removeHeaderName.trim().takeIf { it.isNotEmpty() },
+                        bodyFind = bodyFind.takeIf { it.isNotEmpty() },
+                        bodyReplace = bodyReplace.takeIf { bodyFind.isNotEmpty() },
+                    ),
+                )
+            }) {
+                Text("Save")
+            }
+        }
+    }
+}
+
+/** A minimal toggle chip — avoids pulling in FilterChip's full experimental API surface for two booleans. */
+@Composable
+private fun FilterChipLike(label: String, selected: Boolean, onClick: () -> Unit) {
+    androidx.compose.material3.Surface(
+        onClick = onClick,
+        color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+        shape = MaterialTheme.shapes.small,
+    ) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelMedium,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+        )
     }
 }

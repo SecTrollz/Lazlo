@@ -10,8 +10,10 @@ import androidx.lifecycle.viewModelScope
 import com.evan.lazlo.core.Settings
 import com.evan.lazlo.proxy.CertificateAuthority
 import com.evan.lazlo.proxy.MitmVpnService
+import com.evan.lazlo.proxy.RewriteRuleStore
 import com.evan.lazlo.proxy.TrafficEntry
 import com.evan.lazlo.proxy.TrafficLog
+import com.evan.lazlo.proxy.net.RewriteRule
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -19,6 +21,10 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 
 data class InspectorUiState(
     val inspectorEnabled: Boolean = false,
@@ -27,11 +33,21 @@ data class InspectorUiState(
     val isPreparing: Boolean = false,
     /** Mirrors Settings.screenshotProtectionFlow; MainActivity applies this to the window independently. */
     val screenshotProtectionEnabled: Boolean = true,
+    val rewriteRules: List<RewriteRule> = emptyList(),
+    val showRewriteRules: Boolean = false,
+    val replayingUrl: String? = null,
+    /** One-shot "Replayed — HTTP 200" / "Replay failed: ..." banner; cleared once shown. */
+    val lastReplayResult: String? = null,
 )
+
+/** Headers OkHttp derives itself from the URL/body — copying the originally-captured values for these onto a replayed request would either conflict with what OkHttp computes or just be wrong for a resend (a stale Content-Length after a hand-edited body, a Host that no longer matches). */
+private val REPLAY_SKIPPED_HEADERS = setOf("host", "content-length", "connection", "transfer-encoding")
 
 class InspectorViewModel(application: Application) : AndroidViewModel(application) {
 
     private val settings = Settings(application)
+    private val rewriteRuleStore = RewriteRuleStore(application)
+    private val replayClient = OkHttpClient()
 
     private val _uiState = MutableStateFlow(InspectorUiState())
     val uiState: StateFlow<InspectorUiState> = _uiState.asStateFlow()
@@ -48,11 +64,77 @@ class InspectorViewModel(application: Application) : AndroidViewModel(applicatio
                 _uiState.update { it.copy(screenshotProtectionEnabled = enabled) }
             }
         }
+        viewModelScope.launch {
+            rewriteRuleStore.rules().collect { rules -> _uiState.update { it.copy(rewriteRules = rules) } }
+        }
     }
 
     fun setScreenshotProtectionEnabled(enabled: Boolean) {
         viewModelScope.launch { settings.setScreenshotProtectionEnabled(enabled) }
     }
+
+    // --- Rewrite rules: the "control" half of the inspector ------------
+
+    fun setShowRewriteRules(show: Boolean) = _uiState.update { it.copy(showRewriteRules = show) }
+
+    fun saveRewriteRule(rule: RewriteRule) {
+        viewModelScope.launch { rewriteRuleStore.addOrUpdate(rule) }
+    }
+
+    fun deleteRewriteRule(id: String) {
+        viewModelScope.launch { rewriteRuleStore.remove(id) }
+    }
+
+    fun setRewriteRuleEnabled(id: String, enabled: Boolean) {
+        viewModelScope.launch { rewriteRuleStore.setEnabled(id, enabled) }
+    }
+
+    // --- Replay ----------------------------------------------------------
+
+    /**
+     * Resends a captured request exactly as [TrafficEntry.replay] holds
+     * it, over this app's own normal network stack (OkHttp) — not
+     * through [com.evan.lazlo.proxy.net.TcpIpStack] directly, so if the
+     * inspector is on and its CA is trusted, the replay's own request and
+     * response show up in the traffic log too, the same as any other
+     * request this app makes.
+     */
+    fun replay(entry: TrafficEntry) {
+        val replayable = entry.replay ?: return
+        if (_uiState.value.replayingUrl != null) return
+        _uiState.update { it.copy(replayingUrl = replayable.url) }
+        viewModelScope.launch {
+            val outcome = withContext(Dispatchers.IO) {
+                runCatching {
+                    val method = replayable.method.uppercase()
+                    val contentType = replayable.headers.entries
+                        .firstOrNull { it.key.equals("Content-Type", ignoreCase = true) }?.value
+                    val needsBody = method in setOf("POST", "PUT", "PATCH", "DELETE")
+                    val body = when {
+                        replayable.body.isNotEmpty() -> replayable.body.toRequestBody(contentType?.toMediaTypeOrNull())
+                        needsBody -> ByteArray(0).toRequestBody(contentType?.toMediaTypeOrNull())
+                        else -> null
+                    }
+                    val requestBuilder = Request.Builder().url(replayable.url).method(method, body)
+                    replayable.headers.forEach { (name, value) ->
+                        if (name.lowercase() !in REPLAY_SKIPPED_HEADERS) requestBuilder.header(name, value)
+                    }
+                    replayClient.newCall(requestBuilder.build()).execute().use { it.code }
+                }
+            }
+            _uiState.update {
+                it.copy(
+                    replayingUrl = null,
+                    lastReplayResult = outcome.fold(
+                        onSuccess = { code -> "Replayed — HTTP $code" },
+                        onFailure = { e -> "Replay failed: ${e.message ?: e::class.simpleName}" },
+                    ),
+                )
+            }
+        }
+    }
+
+    fun dismissReplayResult() = _uiState.update { it.copy(lastReplayResult = null) }
 
     /**
      * Persists the toggle as "on" and makes sure the local CA exists —

@@ -1,6 +1,8 @@
 package com.evan.lazlo.proxy
 
 import android.os.ParcelFileDescriptor
+import com.evan.lazlo.proxy.net.ReplayableRequest
+import com.evan.lazlo.proxy.net.RewriteRule
 import com.evan.lazlo.proxy.net.TcpIpStack
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -18,6 +20,8 @@ data class TrafficEntry(
     val status: Int?,
     val bytes: Long,
     val timestamp: Instant = Instant.now(),
+    /** Non-null only when the captured request fully HTTP-decoded — populates the traffic log's "Replay" action. */
+    val replay: ReplayableRequest? = null,
 )
 
 /** Simple in-memory ring buffer; nothing here is written to disk unless the user exports it. */
@@ -46,6 +50,8 @@ class TrafficInterceptor(
     private val protectSocket: (Socket) -> Boolean,
     private val protectDatagramSocket: (DatagramSocket) -> Boolean,
     private val onRequest: (TrafficEntry) -> Unit,
+    /** Read fresh per new flow by TcpIpStack — not a one-time snapshot — so a rule added mid-session takes effect immediately. */
+    private val rewriteRules: () -> List<RewriteRule> = { emptyList() },
     private val scope: CoroutineScope,
 ) {
     private var stack: TcpIpStack? = null
@@ -62,6 +68,7 @@ class TrafficInterceptor(
             // same traffic log as HTTP(S) exchanges, just labeled "DNS"/
             // "UDP" instead of a method verb. See TcpIpStack.handleUdp.
             onUdpDatagram = onRequest,
+            rewriteRules = rewriteRules,
             scope = scope,
         )
         stack = running

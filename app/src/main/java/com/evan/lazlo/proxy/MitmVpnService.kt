@@ -48,6 +48,7 @@ class MitmVpnService : VpnService() {
         val ca = CertificateAuthority(this)
         val caCertificate = ca.ensureCaExists()
         val caPrivateKey = ca.caPrivateKey()
+        val rewriteRuleStore = RewriteRuleStore(this)
 
         val running = TrafficInterceptor(
             caCertificate = caCertificate,
@@ -55,6 +56,12 @@ class MitmVpnService : VpnService() {
             protectSocket = { socket -> protect(socket) },
             protectDatagramSocket = { socket -> protect(socket) },
             onRequest = { entry -> TrafficLog.append(entry) },
+            // Blocking read on the packet pump's own IO dispatcher, not
+            // the main thread — same DataStore this service already
+            // reads CA state from, just a different key. See
+            // RewriteRuleStore.rulesBlocking's own doc for why a
+            // synchronous read is the right shape here.
+            rewriteRules = { rewriteRuleStore.rulesBlocking() },
             scope = scope,
         )
         interceptor = running

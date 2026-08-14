@@ -57,6 +57,8 @@ class TcpIpStack(
     private val onHttpExchange: (TrafficEntry) -> Unit,
     /** Fired once per outbound UDP datagram — DNS queries get a decoded question name, everything else a bare host:port label. Same TrafficLog sink as [onHttpExchange] in practice; kept as its own callback since it isn't an HTTP exchange. */
     private val onUdpDatagram: (TrafficEntry) -> Unit,
+    /** Read once per new flow, not cached — a rule added or toggled mid-session applies to the very next flow without needing the inspector restarted. */
+    private val rewriteRules: () -> List<RewriteRule> = { emptyList() },
     private val scope: CoroutineScope,
 ) {
     private val leafCertificateFactory = com.evan.lazlo.proxy.LeafCertificateFactory(caCertificate, caPrivateKey)
@@ -165,6 +167,7 @@ class TcpIpStack(
                     caCertificate = caCertificate,
                     sendToClient = { data -> sendData(flow, data) },
                     onHttpExchange = onHttpExchange,
+                    rules = rewriteRules(),
                 )
             } catch (_: Throwable) {
                 // A dead upstream, a failed TLS handshake, or the client

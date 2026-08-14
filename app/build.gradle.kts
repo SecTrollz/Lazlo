@@ -99,6 +99,10 @@ dependencies {
     implementation("io.netty:netty-transport:4.1.110.Final")
     implementation("io.netty:netty-codec:4.1.110.Final")
     implementation("io.netty:netty-handler:4.1.110.Final")
+    // Real HTTP/1.x parsing for RewriteEngine (proxy/net/RewriteEngine.kt)
+    // — request/response rewrite rules operate on actually-decoded
+    // HttpRequest/HttpResponse objects, not regex-on-bytes.
+    implementation("io.netty:netty-codec-http:4.1.110.Final")
     implementation("org.bouncycastle:bcpkix-jdk18on:1.78.1")
 
     testImplementation("junit:junit:4.13.2")

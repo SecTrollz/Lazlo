@@ -129,11 +129,21 @@ user-installed CAs — including the inspector's own — so this stays
 usable for actual security research instead of quietly losing
 capability in the name of "secure by default."
 
+The inspector is no longer read-only. **Rewrite rules** decode every
+request/response that passes through it into a real HTTP message (Netty's
+own HTTP codec, not regex) and apply user-defined set/remove-header or
+find/replace-body rules before forwarding — managed from the Inspector
+tab, fail open on anything that doesn't cleanly parse so traffic never
+gets corrupted. Every captured request can also be **replayed** — resent
+as-is via the traffic log's Replay button, over the app's own network
+stack.
+
 The pure logic across all of this (the IPv4/TCP codec, certificate
 signing, the Netty handshake, message-transcript folding, traffic-log
 formatting, address-bar resolution, backend/engine copy, AICore error
 diagnosis, BYOK request/response shaping, browser history/bookmarks
-codec) is covered by 68 passing JVM unit tests; see
+codec, the rewrite engine against real HTTP byte layouts) is covered by
+85 passing JVM unit tests; see
 [`ARCHITECTURE.md`](ARCHITECTURE.md#5-ui--the-three-screens).
 
 What's *not* yet fully proven out is the GeckoView module's actual
