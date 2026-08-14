@@ -27,8 +27,13 @@ import java.util.concurrent.ConcurrentHashMap
  * descriptor, drives a minimal per-flow TCP state machine, and hands
  * each newly-ESTABLISHED flow to [ConnectionRelay] for the real
  * proxying work (TLS termination + re-encryption on :443, plain relay
- * on :80, raw passthrough elsewhere). UDP is passed straight through —
- * mainly DNS — without a TCP-style flow table (see [handleUdp]).
+ * on :80, raw passthrough elsewhere). UDP — mainly DNS — is relayed
+ * through its own `protect()`-ed socket rather than a TCP-style flow
+ * table (see [handleUdp]); every UDP datagram is logged to the traffic
+ * log the same as TCP exchanges are, best-effort decoded as a DNS query
+ * name when it's port 53 traffic. Nothing on this pump ever skips
+ * capture to reach its destination faster — UDP was never routed around
+ * the local relay, only left out of the *visible* log before this.
  *
  * Scope and honesty note: this targets *one local, well-behaved TCP
  * peer* — the device's own apps talking through a VPN TUN — not a
@@ -50,6 +55,8 @@ class TcpIpStack(
     private val caCertificate: X509Certificate,
     caPrivateKey: PrivateKey,
     private val onHttpExchange: (TrafficEntry) -> Unit,
+    /** Fired once per outbound UDP datagram — DNS queries get a decoded question name, everything else a bare host:port label. Same TrafficLog sink as [onHttpExchange] in practice; kept as its own callback since it isn't an HTTP exchange. */
+    private val onUdpDatagram: (TrafficEntry) -> Unit,
     private val scope: CoroutineScope,
 ) {
     private val leafCertificateFactory = com.evan.lazlo.proxy.LeafCertificateFactory(caCertificate, caPrivateKey)
@@ -241,7 +248,7 @@ class TcpIpStack(
         writePacket(IpV4Packet.build(replySource, replyDestination, IpV4Packet.PROTOCOL_TCP, tcpSegment))
     }
 
-    // ---- UDP (passthrough only — mainly DNS) ----
+    // ---- UDP (relayed through its own protected socket — mainly DNS) ----
 
     private suspend fun handleUdp(packet: IpV4Packet) {
         val datagram = UdpDatagram.parse(packet.payload) ?: return
@@ -253,11 +260,27 @@ class TcpIpStack(
                 scope.launch(Dispatchers.IO) { pumpUdpReplies(key, s) }
             }
         }
-        withContext(Dispatchers.IO) {
+        val sent = withContext(Dispatchers.IO) {
             runCatching {
                 socket.send(DatagramPacket(datagram.payload, datagram.payload.size, InetAddress.getByAddress(destinationAddress), key.destinationPort))
             }
-        }
+        }.isSuccess
+        if (sent) logUdpDatagram(key, datagram)
+    }
+
+    private fun logUdpDatagram(key: FlowKey, datagram: UdpDatagram) {
+        val isDns = key.destinationPort == DNS_PORT
+        val host = (if (isDns) DnsMessage.parseQuestionName(datagram.payload) else null)
+            ?: "${key.destinationAddress.toIpString()}:${key.destinationPort}"
+        onUdpDatagram(
+            TrafficEntry(
+                method = if (isDns) "DNS" else "UDP",
+                host = host,
+                path = "",
+                status = null,
+                bytes = datagram.payload.size.toLong(),
+            ),
+        )
     }
 
     private suspend fun pumpUdpReplies(key: FlowKey, socket: DatagramSocket) {
@@ -299,5 +322,6 @@ class TcpIpStack(
         const val RECEIVE_WINDOW = 65535
         const val UDP_IDLE_TIMEOUT_MS = 30_000
         const val NETTY_THREADS = 2
+        const val DNS_PORT = 53
     }
 }

@@ -58,6 +58,10 @@ class TrafficInterceptor(
             caCertificate = caCertificate,
             caPrivateKey = caPrivateKey,
             onHttpExchange = onRequest,
+            // Same sink as onHttpExchange — DNS/UDP entries land in the
+            // same traffic log as HTTP(S) exchanges, just labeled "DNS"/
+            // "UDP" instead of a method verb. See TcpIpStack.handleUdp.
+            onUdpDatagram = onRequest,
             scope = scope,
         )
         stack = running

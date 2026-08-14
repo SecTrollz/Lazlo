@@ -197,10 +197,20 @@ Standard on-device MITM pattern, same one ProxyPin/HttpCanary/PCAPdroid use:
    the upstream connection to the real destination is a genuine
    `Bootstrap`-managed `NioSocketChannel`. Port :80 gets a plain relay,
    anything else raw passthrough, both also Netty-managed. UDP (mainly
-   DNS) is passed straight through, unparsed. Every upstream channel is
-   built from a `SocketChannel` that's `VpnService.protect()`-ed *before*
-   Netty ever touches it — without that, the interceptor's own outbound
-   connections would loop back into its own VPN routes.
+   DNS) is relayed through its own `protect()`-ed `DatagramSocket` in
+   `TcpIpStack.handleUdp` — never dropped, never routed around the local
+   capture layer — and, since a recent fix, logged to the traffic list
+   the same as HTTP(S) exchanges: `DnsMessage` best-effort decodes the
+   query name out of port-53 traffic (`example.com`, not just a bare
+   destination IP), everything else on UDP gets a `host:port` label. The
+   earlier state — UDP relayed but not logged — read as a gap in what
+   the inspector visibly captured, even though every packet was already
+   flowing through the same protected local relay as TCP traffic; this
+   closes that gap rather than leaving it implicit. Every upstream
+   channel (TCP or UDP) is built from a socket that's
+   `VpnService.protect()`-ed *before* anything else touches it — without
+   that, the interceptor's own outbound connections would loop back into
+   its own VPN routes.
 
    `LocalChannel`/`LocalServerChannel` were chosen deliberately over
    Netty's `EmbeddedChannel` (which an earlier version of this file used):
@@ -469,14 +479,15 @@ one-line Compose host, not where the app's logic lives. `gradle
 31) and now also builds `:dynamic-features:gecko_engine` as a genuinely
 separate on-demand module (confirmed by inspecting the resulting base
 APK's contents, not just by the build succeeding). `gradle
-:app:testDebugUnitTest` runs and passes 68 JVM-level unit tests under
+:app:testDebugUnitTest` runs and passes 73 JVM-level unit tests under
 `app/src/test/`: the IPv4/TCP codec, the CA/leaf certificate-signing
 logic, a real end-to-end TLS handshake against the Netty MITM pipeline
-(`NettyTlsTerminationTest`), AICore's error-code-to-plain-language
-diagnosis (`AiCoreDiagnosisTest`), the Anthropic/OpenRouter BYOK request
-and response shaping (`ApiKeyProviderConfigTest`), the browser
-history/bookmarks/downloads JSON codec (`BrowserRecordCodecTest`), and
-the `ui/` layer's pure logic (chat transcript folding, traffic-log
+(`NettyTlsTerminationTest`), the DNS question-name decoder
+(`DnsMessageTest`), AICore's error-code-to-plain-language diagnosis
+(`AiCoreDiagnosisTest`), the Anthropic/OpenRouter BYOK request and
+response shaping (`ApiKeyProviderConfigTest`), the browser history/
+bookmarks/downloads JSON codec (`BrowserRecordCodecTest`), and the
+`ui/` layer's pure logic (chat transcript folding, traffic-log
 formatting, address-bar URL/search resolution, the backend/engine
 explainer copy).
 
