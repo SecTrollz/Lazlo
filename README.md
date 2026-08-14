@@ -97,17 +97,31 @@ pieces:
   `BrowserEngineLoader` — confirmed by inspecting the built APK: the base
   app dropped from 712MB to 85MB once GeckoView moved out of it.
 
+The app has run on a real Pixel, not just in a build sandbox. It's also
+locked down so nothing else on the device can see into it: `FLAG_SECURE`
+blocks screenshots/screen-recording/Recents-thumbnail capture by other
+apps, there are no exported components beyond the launcher activity,
+backups are disabled entirely, and an explicit network security config
+pins outbound traffic to system-trusted CAs only with no cleartext
+fallback. See [`ARCHITECTURE.md`](ARCHITECTURE.md#no-other-app-gets-to-see-inside-lazlo)
+for the full rundown.
+
+AICore/Gemini Nano provisioning is now explicit rather than silent: the
+backend picker has a "Set up Gemini Nano" action with a real progress
+bar, and failures are translated from AICore's raw error codes into
+plain language (`AiCoreDiagnosis`) — including the known `NOT_AVAILABLE`
+("Required LLM feature not found") case that shows up even on genuinely
+supported Pixel hardware.
+
 The pure logic across all of this (the IPv4/TCP codec, certificate
 signing, the Netty handshake, message-transcript folding, traffic-log
-formatting, address-bar resolution, backend/engine copy) is covered by
-53 passing JVM unit tests; see
+formatting, address-bar resolution, backend/engine copy, AICore error
+diagnosis) is covered by 58 passing JVM unit tests; see
 [`ARCHITECTURE.md`](ARCHITECTURE.md#5-ui--the-three-screens).
 
-What's *not* yet done is on-device validation — of the VPN/TUN path (as
-before), the GeckoView module's actual download/install flow, and the
-Compose UI itself (layout, the live chat streaming path, the
-VPN-consent and certificate-install flows), none of which can be
-exercised on a real device or emulator from inside a build sandbox. See
+What's *not* yet fully proven out is the GeckoView module's actual
+download/install flow on-device and the full VPN/TUN capture path under
+real network conditions — see
 [`ARCHITECTURE.md`](ARCHITECTURE.md#current-state) for the honest
 current-state breakdown before relying on this for anything beyond
 development.

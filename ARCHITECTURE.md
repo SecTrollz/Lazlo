@@ -71,6 +71,26 @@ Settings and persisted via DataStore:
 provider; the chat UI only ever talks to the `AiProvider` interface, so
 switching backends is a Settings toggle, not a code change.
 
+**AICore provisioning.** `AiCoreProvider.isReady()` doesn't just build a
+`GenerativeModel` — it calls `prepareInferenceEngine()`, which is what
+actually triggers AICore's first-run model download on a fresh install.
+The backend picker also exposes this explicitly: an AICore row that
+isn't ready yet shows a "Set up Gemini Nano" button
+(`ChatViewModel.setupAiCore()`) that runs provisioning up front with a
+live progress bar fed by `AiCoreProvider.downloadState`, instead of only
+ever happening silently the first time a message is sent. If AICore
+fails, `AiCoreDiagnosis` (`ai/AiCoreProvider.kt`) turns the SDK's raw
+`GenerativeAIException` — a numeric `errorCode` and a terse message —
+into plain language instead of surfacing the raw code. The specific case
+this was built for: **AICore error 8, `NOT_AVAILABLE` ("Required LLM
+feature not found")**, which shows up even on genuinely AICore-supported
+Pixel hardware and is a known, still-unresolved issue reported against
+Google's own `android/ai-samples` repo (issues #3, #8, #24) — it means
+Play Services hasn't switched the on-device LLM feature on for this
+device/account yet, not that anything in this app is missing. It is not
+fixable from inside Lazlo's code; `AiCoreDiagnosis` says so directly
+rather than showing a dead-end error.
+
 ### 2. `browser/` — pluggable rendering engine
 
 ```kotlin
@@ -226,6 +246,53 @@ off-device pass.
   files, never synced to backup (`android:allowBackup="false"` and
   `excludeAppDataFromAutoBackup` set on the secrets directory).
 
+### No other app gets to see inside Lazlo
+
+Beyond keeping secrets off the network and out of backups, Lazlo is
+locked down so that nothing running alongside it on the same device —
+not a malicious app, not a screen-recording tool, not a cloud backup —
+can observe its contents:
+
+- **`FLAG_SECURE`** (`MainActivity.onCreate`, set before any content is
+  attached) blocks the standard OS capture paths for this window: the
+  screenshot shortcut, another app's `MediaProjection`-based screen
+  recording, non-secure external display/cast mirroring, and it blanks
+  the Recents/task-switcher thumbnail to a generic placeholder instead of
+  the live chat transcript or browsed page. This is the same mechanism
+  banking apps and Android's own "Secure Folder" rely on. It cannot stop
+  a device already compromised by a malicious Accessibility Service
+  reading the view hierarchy directly — no app-level flag can — but it
+  closes every capture path a normal app has available to it.
+- **No exported components beyond the launcher.** `MainActivity` is the
+  only `exported="true"` entry point (required for the launcher
+  intent-filter to work at all); the VPN service is `exported="false"`
+  and additionally gated behind the OS's own `BIND_VPN_SERVICE`
+  permission/consent dialog. There is no `ContentProvider`, no
+  deep-link/`BROWSABLE` intent-filter another app could target — nothing
+  for another app to send an `Intent` at and pull data back out through.
+- **`android:allowBackup="false"`** plus explicit empty
+  `data_extraction_rules.xml`/`backup_rules.xml` — nothing about this app
+  (settings, chat history, the local MITM CA) is eligible for cloud
+  backup or device-to-device transfer, so it can't leak through a Google
+  account or a phone-migration tool.
+- **Explicit `network_security_config.xml`**: no cleartext traffic
+  (applies to this app's own network calls *and* to WebView — a page a
+  user browses to over `http://` simply won't load, so nothing routes in
+  the clear on a hostile network), and only OS-shipped CAs are trusted
+  roots. That second part matters specifically for this app: the traffic
+  inspector mints its own local MITM CA to decrypt-and-reinspect *other*
+  apps' connections, and that CA is deliberately never added as a trust
+  anchor here, so Lazlo's own outbound connections (BYOK API calls, its
+  own browsing) can never be intercepted by its own inspector, or by
+  anything else with a user/admin-installed certificate on the device.
+- **Secrets never touch the clipboard or logs.** There is no
+  copy-to-clipboard path for API keys anywhere in the app, and nothing
+  logs message content, keys, or intercepted traffic bodies via `Log.*`
+  — Android sandboxes app-private storage from other apps by default, so
+  the remaining question is always "did this app itself do something
+  that leaks past the sandbox," and the answer here is checked, not
+  assumed.
+
 ### 5. `ui/` — the three screens
 
 `MainActivity` does nothing but set `LazloTheme { LazloApp() }` as its
@@ -366,10 +433,11 @@ one-line Compose host, not where the app's logic lives. `gradle
 31) and now also builds `:dynamic-features:gecko_engine` as a genuinely
 separate on-demand module (confirmed by inspecting the resulting base
 APK's contents, not just by the build succeeding). `gradle
-:app:testDebugUnitTest` runs and passes 53 JVM-level unit tests under
+:app:testDebugUnitTest` runs and passes 58 JVM-level unit tests under
 `app/src/test/`: the IPv4/TCP codec, the CA/leaf certificate-signing
 logic, a real end-to-end TLS handshake against the Netty MITM pipeline
-(`NettyTlsTerminationTest`), and the `ui/` layer's pure logic (chat
+(`NettyTlsTerminationTest`), AICore's error-code-to-plain-language
+diagnosis (`AiCoreDiagnosisTest`), and the `ui/` layer's pure logic (chat
 transcript folding, traffic-log formatting, address-bar URL/search
 resolution, the backend/engine explainer copy).
 
