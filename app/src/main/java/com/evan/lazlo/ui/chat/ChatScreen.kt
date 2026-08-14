@@ -30,6 +30,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -53,6 +54,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.evan.lazlo.ai.AiCoreDownloadState
 import com.evan.lazlo.ai.ChatMessage
 
 /**
@@ -123,6 +125,7 @@ fun ChatScreen(
                 showBackendPicker = false
                 showApiKeyDialog = true
             },
+            onSetupAiCore = viewModel::setupAiCore,
             onDismiss = { showBackendPicker = false },
         )
     }
@@ -286,6 +289,7 @@ private fun BackendPickerDialog(
     state: ChatUiState,
     onSelect: (String) -> Unit,
     onManageKey: () -> Unit,
+    onSetupAiCore: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     Dialog(onDismissRequest = onDismiss) {
@@ -342,10 +346,74 @@ private fun BackendPickerDialog(
                                         Text(if (state.apiKeyConfigured) "Change API key" else "Add API key")
                                     }
                                 }
+                                if (row.id == AiBackendCopy.AICORE_PROVIDER_ID) {
+                                    AiCoreSetupSection(
+                                        isReady = row.isReady,
+                                        running = state.aiCoreSetupRunning,
+                                        setupState = state.aiCoreSetupState,
+                                        onSetup = onSetupAiCore,
+                                    )
+                                }
                             }
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+/**
+ * Inline "get Gemini Nano ready" control shown under the AICore row in
+ * [BackendPickerDialog]. First-time users don't need to know that
+ * "ready" means a native model has to be downloaded and prepared on
+ * device — they get a button, a real progress bar while it happens, and,
+ * if it fails, the plain-language reason from [com.evan.lazlo.ai.AiCoreDiagnosis]
+ * instead of a raw AICore error code.
+ */
+@Composable
+private fun AiCoreSetupSection(
+    isReady: Boolean,
+    running: Boolean,
+    setupState: AiCoreDownloadState?,
+    onSetup: () -> Unit,
+) {
+    when {
+        running -> {
+            Column(modifier = Modifier.padding(top = 4.dp)) {
+                val downloading = setupState as? AiCoreDownloadState.Downloading
+                if (downloading != null && downloading.totalBytes > 0) {
+                    val fraction = (downloading.bytesDownloaded.toFloat() / downloading.totalBytes).coerceIn(0f, 1f)
+                    LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth())
+                    Text(
+                        "Downloading Gemini Nano… ${downloading.bytesDownloaded / 1_000_000} / ${downloading.totalBytes / 1_000_000} MB",
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(top = 2.dp),
+                    )
+                } else {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                        Spacer(modifier = Modifier.size(8.dp))
+                        Text("Setting up Gemini Nano on this device…", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
+        }
+        setupState is AiCoreDownloadState.Failed -> {
+            Column(modifier = Modifier.padding(top = 4.dp)) {
+                Text(
+                    setupState.message,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+                TextButton(onClick = onSetup, modifier = Modifier.padding(top = 2.dp)) {
+                    Text("Try again")
+                }
+            }
+        }
+        !isReady -> {
+            TextButton(onClick = onSetup, modifier = Modifier.padding(top = 2.dp)) {
+                Text("Set up Gemini Nano")
             }
         }
     }

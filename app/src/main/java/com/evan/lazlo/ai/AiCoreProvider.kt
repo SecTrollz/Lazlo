@@ -16,7 +16,56 @@ import kotlinx.coroutines.flow.flow
 sealed class AiCoreDownloadState {
     data object Idle : AiCoreDownloadState()
     data class Downloading(val bytesDownloaded: Long, val totalBytes: Long) : AiCoreDownloadState()
-    data class Failed(val message: String) : AiCoreDownloadState()
+    data class Failed(val message: String, val isDeviceIneligible: Boolean = false) : AiCoreDownloadState()
+}
+
+/**
+ * Turns AICore's raw [GenerativeAIException] (a numeric error code and a
+ * terse internal message — e.g. "AICore failed with error type
+ * 2-INFERENCE_ERROR and error code 8-NOT_AVAILABLE: Required LLM feature
+ * not found") into something an end user can actually act on. Pure and
+ * unit-testable on its own: takes the error code and message as plain
+ * values rather than the exception itself, since [GenerativeAIException]'s
+ * own subclass constructors are `internal` to the SDK's module and can't
+ * be instantiated from this app's test source set — the
+ * [GenerativeAIException.ErrorCode] constants it switches on are public,
+ * and that's all this needs.
+ */
+internal object AiCoreDiagnosis {
+
+    /** True for codes that mean "this device/account can't use AICore right now," not a transient hiccup. */
+    fun isDeviceIneligible(errorCode: Int): Boolean = errorCode == GenerativeAIException.ErrorCode.NOT_AVAILABLE ||
+        errorCode == GenerativeAIException.ErrorCode.NEEDS_SYSTEM_UPDATE
+
+    fun messageFor(e: GenerativeAIException): String = messageFor(e.errorCode, e.message)
+
+    fun messageFor(errorCode: Int, rawMessage: String?): String = when (errorCode) {
+        GenerativeAIException.ErrorCode.NOT_AVAILABLE ->
+            "Gemini Nano isn't available on this device yet (AICore error 8, NOT_AVAILABLE: " +
+                "\"Required LLM feature not found\"). This shows up even on Pixels that officially " +
+                "support AICore — it means Play Services hasn't switched the on-device LLM feature on " +
+                "for this device/account yet, not that this app is missing something. Two things worth " +
+                "trying: 1) Settings → Apps → see all apps → \"Android AICore\" → make sure it's updated " +
+                "via the Play Store (search \"AICore\" if it's not listed as an app yet); 2) some devices " +
+                "need to be enrolled in Google's AICore Developer Preview program before this feature " +
+                "unlocks at all. This can't be fixed from inside Lazlo — it's controlled by Google Play " +
+                "services on this device."
+        GenerativeAIException.ErrorCode.NEEDS_SYSTEM_UPDATE ->
+            "This device needs a system update before Gemini Nano can run on it. Check Settings → " +
+                "System → System update, then try again."
+        GenerativeAIException.ErrorCode.NOT_ENOUGH_DISK_SPACE ->
+            "Not enough free storage to download the on-device model. Free up some space and try again."
+        GenerativeAIException.ErrorCode.BINDING_FAILURE,
+        GenerativeAIException.ErrorCode.SERVICE_DISCONNECTED,
+        GenerativeAIException.ErrorCode.BINDING_DIED,
+        GenerativeAIException.ErrorCode.NULL_BINDING ->
+            "Couldn't connect to the on-device AI service on this device. Try again — if it keeps " +
+                "happening, restart the device."
+        GenerativeAIException.ErrorCode.BUSY ->
+            "The on-device model is busy handling another request. Try again in a moment."
+        else ->
+            "${rawMessage ?: "AICore couldn't prepare the on-device model"} (AICore error $errorCode)."
+    }
 }
 
 /**
@@ -54,16 +103,33 @@ class AiCoreProvider(private val context: Context) : AiProvider {
         if (!prepared) {
             m.prepareInferenceEngine()
             prepared = true
+            _downloadState.value = AiCoreDownloadState.Idle
         }
         true
-    }.getOrElse {
+    }.getOrElse { t ->
         // A failed prepare leaves this model unusable — drop it so the
         // next isReady() call starts clean instead of being stuck
         // thinking it's already "prepared."
         model = null
         prepared = false
+        _downloadState.value = AiCoreDownloadState.Failed(
+            message = (t as? GenerativeAIException)?.let(AiCoreDiagnosis::messageFor)
+                ?: (t.message ?: "Couldn't prepare Gemini Nano on this device."),
+            isDeviceIneligible = (t as? GenerativeAIException)?.let { AiCoreDiagnosis.isDeviceIneligible(it.errorCode) } ?: false,
+        )
         false
     }
+
+    /**
+     * Explicit "set up Gemini Nano now" entry point: what a first-run
+     * setup screen calls so a user starting from zero can trigger
+     * provisioning deliberately — with [downloadState] driving a real
+     * progress UI — instead of this only ever happening silently the
+     * first time they hit send. Functionally identical to [isReady];
+     * kept as its own clearly-named entry point because that's the
+     * function a setup flow should call.
+     */
+    suspend fun provisionAndPrepare(): Boolean = isReady()
 
     private fun buildModel(): GenerativeModel {
         val generationConfig = GenerationConfig.builder().apply { context = this@AiCoreProvider.context }.build()
@@ -83,7 +149,10 @@ class AiCoreProvider(private val context: Context) : AiProvider {
                 }
 
                 override fun onDownloadFailed(errorMessage: String, e: GenerativeAIException) {
-                    _downloadState.value = AiCoreDownloadState.Failed(errorMessage)
+                    _downloadState.value = AiCoreDownloadState.Failed(
+                        message = AiCoreDiagnosis.messageFor(e),
+                        isDeviceIneligible = AiCoreDiagnosis.isDeviceIneligible(e.errorCode),
+                    )
                 }
             }
         )
@@ -92,13 +161,23 @@ class AiCoreProvider(private val context: Context) : AiProvider {
 
     override fun streamChat(history: List<ChatMessage>): Flow<ChatToken> = flow {
         val m = model ?: run { isReady(); model }
-        ?: throw IllegalStateException("AICore unavailable on this device")
+        ?: throw IllegalStateException(
+            (_downloadState.value as? AiCoreDownloadState.Failed)?.message
+                ?: "AICore unavailable on this device"
+        )
 
         val prompt = history.joinToString("\n\n") { "${it.role}: ${it.content}" }
         // AICore's streaming callback API is adapted to a cold Flow here;
         // in the real client this wraps GenerativeModel.generateContentStream(prompt).
-        m.generateContentStream(prompt).collect { chunk ->
-            emit(ChatToken(chunk.text ?: ""))
+        try {
+            m.generateContentStream(prompt).collect { chunk ->
+                emit(ChatToken(chunk.text ?: ""))
+            }
+        } catch (e: GenerativeAIException) {
+            // Surface the same plain-language diagnosis here as prepare
+            // failures get — a raw "error code 8" is meaningless to a
+            // first-time user reading the chat error banner.
+            throw IllegalStateException(AiCoreDiagnosis.messageFor(e), e)
         }
         emit(ChatToken("", isFinal = true))
     }

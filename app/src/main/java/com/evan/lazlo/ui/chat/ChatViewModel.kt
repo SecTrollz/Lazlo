@@ -5,6 +5,8 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.evan.lazlo.ai.AiCoreDownloadState
+import com.evan.lazlo.ai.AiCoreProvider
 import com.evan.lazlo.ai.AiProvider
 import com.evan.lazlo.ai.AiProviderFactory
 import com.evan.lazlo.ai.ChatMessage
@@ -37,6 +39,8 @@ data class ChatUiState(
     val backendRows: List<BackendRow> = emptyList(),
     val apiKeyConfigured: Boolean = false,
     val backendLoading: Boolean = true,
+    val aiCoreSetupRunning: Boolean = false,
+    val aiCoreSetupState: AiCoreDownloadState? = null,
 ) {
     /** The row for whichever backend is currently selected, if it's known yet. */
     val activeBackend: BackendRow? get() = backendRows.find { it.id == activeProviderId }
@@ -97,6 +101,45 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     fun dismissError() {
         _uiState.update { it.copy(errorMessage = null) }
+    }
+
+    /**
+     * Explicit "set up Gemini Nano now" action for the backend picker:
+     * runs [AiCoreProvider.provisionAndPrepare] against a scratch
+     * provider instance (not [activeProvider] — this can run before the
+     * user has even picked AICore as their active backend) while
+     * streaming its [AiCoreProvider.downloadState] into the UI, so a
+     * first-time user gets real progress instead of the setup only ever
+     * happening silently the first time they hit send.
+     */
+    fun setupAiCore() {
+        if (_uiState.value.aiCoreSetupRunning) return
+        _uiState.update { it.copy(aiCoreSetupRunning = true, aiCoreSetupState = null) }
+        viewModelScope.launch {
+            val provider = AiCoreProvider(getApplication())
+            val progressJob = launch {
+                provider.downloadState.collect { state ->
+                    _uiState.update { it.copy(aiCoreSetupState = state) }
+                }
+            }
+            val ready = withContext(Dispatchers.IO) { provider.provisionAndPrepare() }
+            progressJob.cancel()
+            provider.close()
+            _uiState.update { current ->
+                current.copy(
+                    aiCoreSetupRunning = false,
+                    // A successful prepare means there's nothing left to show;
+                    // a failed one keeps whatever AiCoreDownloadState.Failed
+                    // the provider already published so the reason stays visible.
+                    aiCoreSetupState = if (ready) null else current.aiCoreSetupState,
+                )
+            }
+            refreshBackendRows()
+        }
+    }
+
+    fun dismissAiCoreSetup() {
+        _uiState.update { it.copy(aiCoreSetupState = null) }
     }
 
     fun sendMessage() {
