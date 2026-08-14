@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Sampled from the Lazlo emblem -->
+    <color name="ic_launcher_background">#FFFFFF</color>
+    <color name="lazlo_ink">#0B1B3A</color>
+    <color name="lazlo_red">#E23B3B</color>
+    <color name="lazlo_orange">#F2802E</color>
+    <color name="lazlo_green">#5BC24B</color>
+    <color name="lazlo_blue">#1D63D8</color>
+    <color name="lazlo_sky">#3FA4E0</color>
+</resources>
