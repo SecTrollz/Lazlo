@@ -21,14 +21,23 @@ sending" — not an interception tool against third parties.
 ## Module map
 
 ```
-com.evan.lazlo/
+com.evan.lazlo/                          (module :app)
 ├── ai/            AiProvider interface + 3 implementations + factory
-├── browser/       BrowserEngine interface + WebView/GeckoView impls
-├── proxy/         Local VpnService-backed MITM inspector + CA management
+├── browser/       BrowserEngine interface, ChromiumEngine, and
+│                  BrowserEngineLoader (loads GeckoEngine on demand —
+│                  see dynamic-features/gecko-engine/ below)
+├── proxy/         Local VpnService-backed MITM inspector + CA management,
+│                  a Netty-based embedded proxy in proxy/net/
 ├── core/          Settings (DataStore), Keystore-backed secret storage
 └── ui/            Compose UI: three screens + their ViewModels, tied
                    together by a bottom-nav Scaffold (MainActivity itself
                    is just a one-line host for this)
+
+dynamic-features/gecko-engine/           (module :dynamic-features:gecko_engine)
+└── com.evan.lazlo.browser.GeckoEngine   The only class here — GeckoView
+                                          itself lives only in this
+                                          on-demand module, never in the
+                                          base APK
 ```
 
 ### 1. `ai/` — pluggable model backend
@@ -75,17 +84,40 @@ interface BrowserEngine {
 
 - **ChromiumEngine** — thin wrapper around Android's system `WebView`
   (Chromium-based). Zero extra APK size, uses whatever WebView version
-  is installed/updated via Play, sandboxed the way any WebView is.
+  is installed/updated via Play, sandboxed the way any WebView is. Lives
+  in the base `:app` module.
 - **GeckoEngine** — wraps Mozilla's **GeckoView** (`org.mozilla.geckoview`).
-  Adds ~30–50MB to the APK (ship as a Play Feature Delivery on-demand
-  module so it's not in the base install) but gives you Firefox's
-  tracking-protection lists, independent cert validation, and an engine
-  that isn't Google's.
+  Adds ~30–50MB, so it lives entirely in its own dynamic feature module,
+  `dynamic-features/gecko-engine/` (Gradle project `:dynamic-features:gecko_engine`
+  — the directory keeps the hyphen, but the module/split *name* Android
+  actually uses can't contain one, only letters/digits/underscores; see
+  the rename in `settings.gradle.kts`), delivered on-demand via Play
+  Feature Delivery — never bundled into the base APK. **Verified, not
+  assumed**: `dist:fusing dist:include="false"` in that module's
+  manifest matters here — leaving it `"true"` was empirically observed
+  to fuse GeckoView straight into a plain `assembleDebug` output anyway
+  (the base APK dropped from 712MB to 85MB once that one attribute was
+  corrected, confirmed by inspecting the built APK's contents directly,
+  not by reading documentation and assuming). `BrowserEngineLoader` (in
+  `:app`, since `:app` can't have a compile-time dependency on a class
+  that lives only in the feature module) drives Play's
+  `SplitInstallManager` to request the module and reports install
+  progress, then constructs `GeckoEngine` via reflection once it's
+  confirmed installed — the standard shape for "base module defines the
+  interface, feature module provides the implementation."
 
 Engine choice is a per-tab or global Settings toggle; both implementations
 route their network layer through the same local proxy port when the
 inspector is enabled (see below), so traffic capture works identically
 regardless of engine.
+
+**What's verified vs. not here:** the module split itself, the manifest
+attributes, and the reflection-based loading all compile and were
+confirmed by inspecting real build output (the APK-size drop above). The
+actual `SplitInstallManager` install flow — a real download, progress
+callbacks, the user-confirmation dialog for a large/cellular download —
+needs a real device or Play's internal testing track to exercise; a
+build sandbox with no Play Store infrastructure can't trigger it.
 
 ### 3. `proxy/` — local traffic inspector
 
@@ -106,18 +138,48 @@ Standard on-device MITM pattern, same one ProxyPin/HttpCanary/PCAPdroid use:
    proper `SubjectAlternativeName`/`ExtendedKeyUsage` extensions. This is
    the actual "MITM" step: a client that trusts the CA cert above accepts
    this leaf for that host without complaint.
-3. **`proxy/net/` — the packet pump** — `TcpIpStack` reads raw IPv4
-   packets off the VPN's TUN fd, drives a minimal per-flow TCP state
-   machine (`TcpFlow`/`IpV4Packet`/`TcpSegment`/`UdpDatagram`), and hands
-   each ESTABLISHED flow to `ConnectionRelay`: TLS termination + a real
-   upstream TLS connection on :443 (bridged through a real loopback
-   `SSLServerSocket`/`SSLSocket` pair using the leaf from
-   `LeafCertificateFactory`, rather than a hand-rolled `SSLEngine`
-   driver), a plain relay on :80, or raw passthrough on any other port
-   so the rest of the device's traffic keeps working. UDP (mainly DNS)
-   is passed straight through, unparsed. Every upstream socket is routed
-   through `VpnService.protect()` first — without that, the interceptor's
-   own outbound connections would loop back into its own VPN routes.
+3. **`proxy/net/` — the packet pump, Netty-based** — `TcpIpStack` reads
+   raw IPv4 packets off the VPN's TUN fd and drives a minimal per-flow
+   TCP state machine (`TcpFlow`/`IpV4Packet`/`TcpSegment`/`UdpDatagram`;
+   this framing layer is hand-written since Netty has no TUN-native
+   transport — nothing to plug in here). Each ESTABLISHED flow then
+   hands off to `ConnectionRelay`, which *is* the "Netty + a MITM layer"
+   embedded proxy: TLS termination on :443 runs through a real in-process
+   Netty channel pair on `LocalChannel`/`LocalServerChannel` (Netty's own
+   local transport for intra-JVM pipes) with `SniHandler` picking — and,
+   via `LeafCertificateFactory`, minting — the right leaf cert per host,
+   then a real `SslHandler` doing the actual handshake/record framing;
+   the upstream connection to the real destination is a genuine
+   `Bootstrap`-managed `NioSocketChannel`. Port :80 gets a plain relay,
+   anything else raw passthrough, both also Netty-managed. UDP (mainly
+   DNS) is passed straight through, unparsed. Every upstream channel is
+   built from a `SocketChannel` that's `VpnService.protect()`-ed *before*
+   Netty ever touches it — without that, the interceptor's own outbound
+   connections would loop back into its own VPN routes.
+
+   `LocalChannel`/`LocalServerChannel` were chosen deliberately over
+   Netty's `EmbeddedChannel` (which an earlier version of this file used):
+   `EmbeddedChannel` is built for driving a pipeline synchronously from a
+   single caller — it's meant for unit-testing handlers — and this flow
+   needs bytes fed in from one coroutine and drained from another.
+   Forcing that through `EmbeddedChannel` meant hand-rolling a mutex
+   around a class documented as not safe for that. The local-transport
+   pair instead runs each side's handler on a real `EventLoop`, exactly
+   like a real socket connection, so Netty's own per-channel
+   single-threaded execution guarantee does the synchronization instead
+   of anything this codebase writes itself.
+
+   **Verified, not just written**: `app/src/test/java/.../NettyTlsTerminationTest.kt`
+   is a real end-to-end JVM test — a genuine `javax.net.ssl.SSLSocket`
+   client (the same shape as any real app's TLS stack) connects over a
+   real loopback TCP socket to a Netty server pipeline built the same
+   way `ConnectionRelay` builds one, and the test confirms the handshake
+   succeeds, the leaf certificate presented is the exact one
+   `LeafCertificateFactory` minted for the requested host (via SNI), and
+   bytes round-trip correctly through the decrypted pipeline. That
+   validates the interception mechanism itself; it doesn't (and can't,
+   on the JVM) exercise the VPN/TUN plumbing that feeds real device
+   traffic into it — see the scope note below.
 4. **MitmVpnService** — the local-loopback `VpnService` that owns the TUN
    interface and drives `TcpIpStack`'s `pump()`/`shutdown()` across its
    lifecycle. TLS is terminated locally only — nothing is forwarded to
@@ -244,35 +306,54 @@ dependencies {
     implementation "androidx.security:security-crypto:1.1.0-alpha06"
     implementation "com.google.mediapipe:tasks-genai:0.10.14"
     implementation "com.google.ai.edge.aicore:aicore:0.0.1-exp02"
-    // GeckoView is date-stamped, not plain semver, and lives on Mozilla's
-    // own Maven repo (https://maven.mozilla.org/maven2/) — add that
-    // repository alongside google()/mavenCentral() in settings.gradle.kts.
-    implementation "org.mozilla.geckoview:geckoview:130.0.20240913135723" // as dynamic feature module
-    // No Netty: proxy/net/TcpIpStack.kt is a small hand-written IPv4/TCP
-    // codec, and TLS termination bridges through a real loopback
-    // SSLSocket/SSLServerSocket pair — see proxy/'s section above.
+    // On-demand module install/progress — see BrowserEngineLoader.kt.
+    implementation "com.google.android.play:feature-delivery:2.1.0"
+    implementation "com.google.android.play:feature-delivery-ktx:2.1.0"
+    // netty-all pulls in desktop-only native epoll/kqueue transport jars
+    // that duplicate META-INF/INDEX.LIST inside an APK and aren't usable
+    // on Android anyway (Android uses plain NIO), so depend on the
+    // individual modules the embedded proxy (proxy/net/ConnectionRelay.kt)
+    // actually needs instead of the "all" aggregate.
+    implementation "io.netty:netty-common:4.1.110.Final"
+    implementation "io.netty:netty-buffer:4.1.110.Final"
+    implementation "io.netty:netty-transport:4.1.110.Final"
+    implementation "io.netty:netty-codec:4.1.110.Final"
+    implementation "io.netty:netty-handler:4.1.110.Final"
     implementation "org.bouncycastle:bcpkix-jdk18on:1.78.1"
 }
 ```
 
-Two things worth knowing about the above, both already handled in
+GeckoView itself (`org.mozilla.geckoview:geckoview:130.0.20240913135723`,
+date-stamped rather than plain semver, from Mozilla's own Maven repo —
+`https://maven.mozilla.org/maven2/`, added alongside google()/
+mavenCentral() in `settings.gradle.kts`) is a dependency of the
+`dynamic-features/gecko-engine` module, not of `:app` — see the
+`browser/` section above for why.
+
+Three things worth knowing about the above, all already handled in
 `app/build.gradle.kts`:
 
-- The three `org.bouncycastle:*-jdk18on` jars all ship the same
-  multi-release OSGi manifest fragment; it needs excluding in
+- Every `io.netty:*` jar ships an identical `META-INF/INDEX.LIST`, and
+  the three `org.bouncycastle:*-jdk18on` jars all ship the same
+  multi-release OSGi manifest fragment. Both need excluding in
   `packaging { resources { excludes += ... } }` or
   `mergeDebugJavaResource` fails on the duplicate.
 - The AICore client library itself requires `minSdk 31` (its manifest
   declares that floor), which sets the floor for the whole app.
+- Android dynamic-feature module names may only contain letters,
+  digits, and underscores — no hyphens. `generateDebugFeatureMetadata`
+  fails outright otherwise, which is how this was caught (empirically,
+  not from reading the rule somewhere first).
 
 ## Build-out order
 
 1. `core` (Settings + Keystore secrets) — everything else depends on it.
 2. `ai` — start with `ApiKeyProvider` (fastest to test), then `AiCoreProvider`.
 3. `browser` — `ChromiumEngine` first (no extra deps), `GeckoEngine` as
-   the feature module once the interface is proven.
+   the feature module once the interface is proven. Both done: GeckoEngine
+   now lives in `dynamic-features/gecko-engine/`, loaded on demand.
 4. `proxy` — CA generation and install flow first, VPN capture last (most
-   moving parts).
+   moving parts). Both done, including the Netty-based embedded proxy.
 
 ## Current state
 
@@ -282,9 +363,13 @@ layer (chat / browser / traffic inspector, tied together by a bottom
 `NavigationBar`) that actually surfaces all of it — `MainActivity` is a
 one-line Compose host, not where the app's logic lives. `gradle
 :app:assembleDebug` succeeds against this tree (compileSdk 35, minSdk
-31), and `gradle :app:testDebugUnitTest` runs and passes the JVM-level
-unit tests under `app/src/test/`: the IPv4/TCP codec, the CA/leaf
-certificate-signing logic, and the `ui/` layer's pure logic (chat
+31) and now also builds `:dynamic-features:gecko_engine` as a genuinely
+separate on-demand module (confirmed by inspecting the resulting base
+APK's contents, not just by the build succeeding). `gradle
+:app:testDebugUnitTest` runs and passes 53 JVM-level unit tests under
+`app/src/test/`: the IPv4/TCP codec, the CA/leaf certificate-signing
+logic, a real end-to-end TLS handshake against the Netty MITM pipeline
+(`NettyTlsTerminationTest`), and the `ui/` layer's pure logic (chat
 transcript folding, traffic-log formatting, address-bar URL/search
 resolution, the backend/engine explainer copy).
 
@@ -297,17 +382,22 @@ implementations, not stubs:
   mints real per-host leaf certificates signed by it.
 - **`TrafficInterceptor`'s packet pump** (`proxy/net/`) — a real IPv4/TCP
   parser and per-flow TCP state machine reading off the VPN's TUN fd,
-  wired to a real TLS-terminating relay via a loopback
-  `SSLServerSocket`/`SSLSocket` bridge.
+  wired to a real Netty-based TLS-terminating relay (`SniHandler` +
+  `LocalChannel`/`LocalServerChannel` + a real upstream `NioSocketChannel`
+  — see the `proxy/` section above), matching this doc's original
+  "Netty + a MITM layer" design rather than a from-scratch substitute.
 
 Both are implemented for real and compile-verified, and the pieces with
-no Android/VPN dependency (the codec, the certificate signing) are
+no Android/VPN dependency (the codec, the certificate signing, and now
+the Netty MITM handshake itself via `NettyTlsTerminationTest`) are
 covered by passing JVM unit tests. What none of that testing covers —
 because it can't be exercised outside a real Android device or
 emulator — is the actual TUN read/write loop, the VPN-consent flow, and
-the loopback TLS bridge under real traffic. Treat those as implemented
-but **not yet validated on-device**, and budget for an on-device pass
-(a real HTTPS request through the inspector, watched in Android Studio's
+the Netty relay under real device traffic, plus the GeckoView module's
+actual `SplitInstallManager` download/install flow. Treat those as
+implemented but **not yet validated on-device**, and budget for an
+on-device pass (a real HTTPS request through the inspector, and a real
+GeckoView module install, both watched in Android Studio's
 debugger/logcat) before trusting this for anything beyond development.
 
 **On the `ui/` layer specifically:** the Compose screens compile clean

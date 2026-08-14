@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:dist="http://schemas.android.com/apk/distribution">
+
+    <!--
+      On-demand delivery: not in the base install. GeckoView alone runs
+      ~30-50MB, which is why this whole module exists instead of a plain
+      Gradle dependency in app/ — see BrowserEngineLoader.kt in the app
+      module for how it's requested and loaded at runtime.
+    -->
+    <dist:module
+        dist:instant="false"
+        dist:title="@string/gecko_engine_title">
+        <dist:delivery>
+            <dist:on-demand />
+        </dist:delivery>
+        <!--
+          include="false": never fold this module into a standalone/
+          universal APK. Fusing exists for pre-Lollipop devices that
+          can't do split delivery at all — irrelevant here (minSdk 31)
+          — but leaving it "true" was empirically observed to bundle
+          GeckoView straight into plain `assembleDebug` output too,
+          defeating the entire point of splitting it out.
+        -->
+        <dist:fusing dist:include="false" />
+    </dist:module>
+
+    <application />
+
+</manifest>

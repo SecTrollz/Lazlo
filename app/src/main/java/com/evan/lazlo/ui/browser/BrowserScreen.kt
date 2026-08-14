@@ -1,6 +1,9 @@
 package com.evan.lazlo.ui.browser
 
+import android.app.Activity
 import android.app.Application
+import android.content.Context
+import android.content.ContextWrapper
 import android.widget.FrameLayout
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -19,6 +22,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -44,7 +48,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.evan.lazlo.browser.BrowserEngine
 import com.evan.lazlo.browser.ChromiumEngine
 import com.evan.lazlo.browser.EngineKind
-import com.evan.lazlo.browser.GeckoEngine
+import com.evan.lazlo.browser.GeckoModuleState
 
 /**
  * The browsing tab: an address bar (type a URL or a search), back /
@@ -112,7 +116,12 @@ fun BrowserScreen(
                         val container = FrameLayout(ctx)
                         val engine = when (state.engineKind) {
                             EngineKind.CHROMIUM -> ChromiumEngine(ctx)
-                            EngineKind.GECKO -> GeckoEngine(ctx)
+                            // Only reached once the module install below
+                            // has already completed — GeckoEngine isn't a
+                            // compile-time dependency of this module, so
+                            // it's loaded via reflection once Play
+                            // confirms it's actually installed.
+                            EngineKind.GECKO -> viewModel.browserEngineLoader.newGeckoEngine()
                         }
                         engine.onUrlChanged = { url ->
                             viewModel.onNavigationStateChanged(url, engine.canGoBack(), engine.canGoForward())
@@ -138,6 +147,90 @@ fun BrowserScreen(
             onSelect = viewModel::setEngine,
             onDismiss = { viewModel.setEnginePickerVisible(false) },
         )
+    }
+
+    state.geckoModuleState?.let { moduleState ->
+        GeckoModuleInstallDialog(
+            state = moduleState,
+            onDismiss = viewModel::dismissGeckoModuleInstall,
+            onConfirmInstall = { activity, sessionState ->
+                viewModel.browserEngineLoader.confirmInstall(sessionState, activity, GECKO_INSTALL_CONFIRMATION_REQUEST_CODE)
+            },
+        )
+    }
+}
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
+
+private const val GECKO_INSTALL_CONFIRMATION_REQUEST_CODE = 4201
+
+/**
+ * GeckoView isn't bundled in the base app (see BrowserEngineLoader) —
+ * this shows while its ~30-50MB module downloads, so picking it from
+ * the engine list doesn't just silently stall.
+ */
+@Composable
+private fun GeckoModuleInstallDialog(
+    state: GeckoModuleState,
+    onDismiss: () -> Unit,
+    onConfirmInstall: (Activity, com.google.android.play.core.splitinstall.SplitInstallSessionState) -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+            Column(modifier = Modifier.padding(20.dp)) {
+                Text("Downloading GeckoView", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "GeckoView isn't included by default to keep the app small. It only needs to download once.",
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(top = 4.dp, bottom = 12.dp),
+                )
+                when (state) {
+                    is GeckoModuleState.NotInstalled, GeckoModuleState.Installing -> {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                        Text(
+                            if (state == GeckoModuleState.Installing) "Installing…" else "Starting download…",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(top = 8.dp),
+                        )
+                    }
+                    is GeckoModuleState.Downloading -> {
+                        val fraction = if (state.totalBytes > 0) (state.bytesDownloaded.toFloat() / state.totalBytes) else 0f
+                        LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth())
+                        Text(
+                            "${state.bytesDownloaded / 1_000_000}MB of ${state.totalBytes / 1_000_000}MB",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(top = 8.dp),
+                        )
+                    }
+                    is GeckoModuleState.Installed -> {
+                        Text("Done — switching to GeckoView.", style = MaterialTheme.typography.bodySmall)
+                    }
+                    is GeckoModuleState.RequiresConfirmation -> {
+                        Text(
+                            "This download needs your confirmation (usually because it's large or you're on cellular data).",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(bottom = 12.dp),
+                        )
+                        val context = LocalContext.current
+                        Button(onClick = {
+                            context.findActivity()?.let { onConfirmInstall(it, state.state) }
+                        }) {
+                            Text("Continue")
+                        }
+                    }
+                    is GeckoModuleState.Failed -> {
+                        Text(
+                            "The download didn't complete (error ${state.errorCode}). Staying on the current engine.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 

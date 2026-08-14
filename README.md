@@ -51,18 +51,22 @@ inspectable piece instead of a black box:
 ## Module map
 
 ```
-com.evan.lazlo/
+com.evan.lazlo/                          (module :app)
 ├── ai/            AiProvider interface + BYOK / AICore / MediaPipe implementations
-├── browser/       BrowserEngine interface + WebView / GeckoView implementations
-├── proxy/         Local VpnService-backed traffic inspector + CA management
+├── browser/       BrowserEngine interface + WebView; loads GeckoView on demand
+├── proxy/         Local VpnService-backed traffic inspector + CA management,
+│                  Netty-based embedded proxy in proxy/net/
 └── core/          Settings (DataStore), Keystore-backed secret storage
+
+dynamic-features/gecko-engine/           (module :dynamic-features:gecko_engine)
+└── GeckoEngine — GeckoView itself, on-demand only, never in the base APK
 ```
 
 | Layer | Interface | Implementations |
 |---|---|---|
 | AI backend | `AiProvider` | `ApiKeyProvider` (BYOK REST), `AiCoreProvider` (Gemini Nano, on-device), `MediaPipeProvider` (local model file, on-device) |
-| Browser engine | `BrowserEngine` | `ChromiumEngine` (system WebView), `GeckoEngine` (GeckoView) |
-| Traffic inspector | — | `CertificateAuthority`, `LeafCertificateFactory`, `MitmVpnService`, `TrafficInterceptor` + the packet pump in `proxy/net/` |
+| Browser engine | `BrowserEngine` | `ChromiumEngine` (system WebView), `GeckoEngine` (GeckoView, loaded on demand via `BrowserEngineLoader`) |
+| Traffic inspector | — | `CertificateAuthority`, `LeafCertificateFactory`, `MitmVpnService`, `TrafficInterceptor` + the Netty-based packet pump in `proxy/net/` |
 
 Secrets (API keys, the inspector's CA private key) live only in Android
 Keystore-backed storage — never in DataStore, never in plaintext, never
@@ -70,38 +74,53 @@ included in backups.
 
 ## Project status
 
-All four backend modules are implemented, not stubbed, and there's now a
-real UI on top of them instead of a placeholder single screen: three
-sections — **Chat**, **Browser**, **Inspector** — under a Material3
-bottom navigation bar, each wired to the module it fronts
-(`AiProviderFactory`, `BrowserEngine`, `TrafficLog`/`CertificateAuthority`
-respectively). The Gradle project shell opens and builds cleanly in
-Android Studio. That includes what were previously the two heaviest open
-backend pieces — the CA's Keystore-backed private key and the
-inspector's actual TUN packet pump + TLS-terminating relay
-(`proxy/net/`) — both real implementations with passing JVM unit tests
-for the parts that don't need a device, and the same is true of the new
-UI layer's pure logic (message-transcript folding, traffic-log
-formatting, address-bar URL/search resolution, and the plain-language
-backend/engine explanations are all unit tested; see
-[`ARCHITECTURE.md`](ARCHITECTURE.md#5-ui--the-three-screens)).
+All four backend modules are implemented, not stubbed, and there's a real
+UI on top of them instead of a placeholder single screen: three sections
+— **Chat**, **Browser**, **Inspector** — under a Material3 bottom
+navigation bar, each wired to the module it fronts (`AiProviderFactory`,
+`BrowserEngine`, `TrafficLog`/`CertificateAuthority` respectively). The
+Gradle project (now a proper multi-module build — `:app` plus
+`:dynamic-features:gecko_engine`) opens and builds cleanly in Android
+Studio. That includes what were previously the two heaviest open backend
+pieces:
+
+- The CA's Keystore-backed private key, with `LeafCertificateFactory`
+  minting real per-host leaf certificates signed by it.
+- The inspector's actual TUN packet pump + a **Netty-based** MITM relay
+  in `proxy/net/` — matching the original architecture's "Netty + a MITM
+  layer" design — verified with a real end-to-end JVM test
+  (`NettyTlsTerminationTest`) where a genuine `SSLSocket` client
+  completes a TLS handshake against the actual relay pipeline and
+  confirms it receives the correct dynamically-minted leaf certificate.
+- GeckoView split into its own on-demand Play Feature Delivery module
+  (`dynamic-features/gecko-engine/`), loaded at runtime via
+  `BrowserEngineLoader` — confirmed by inspecting the built APK: the base
+  app dropped from 712MB to 85MB once GeckoView moved out of it.
+
+The pure logic across all of this (the IPv4/TCP codec, certificate
+signing, the Netty handshake, message-transcript folding, traffic-log
+formatting, address-bar resolution, backend/engine copy) is covered by
+53 passing JVM unit tests; see
+[`ARCHITECTURE.md`](ARCHITECTURE.md#5-ui--the-three-screens).
 
 What's *not* yet done is on-device validation — of the VPN/TUN path (as
-before) and now also of the Compose UI itself (layout, the live chat
-streaming path, the VPN-consent and certificate-install flows), none of
-which can be exercised on a real device or emulator from inside a build
-sandbox. See [`ARCHITECTURE.md`](ARCHITECTURE.md#current-state) for the
-honest current-state breakdown before relying on this for anything
-beyond development.
+before), the GeckoView module's actual download/install flow, and the
+Compose UI itself (layout, the live chat streaming path, the
+VPN-consent and certificate-install flows), none of which can be
+exercised on a real device or emulator from inside a build sandbox. See
+[`ARCHITECTURE.md`](ARCHITECTURE.md#current-state) for the honest
+current-state breakdown before relying on this for anything beyond
+development.
 
 ## Getting started
 
 1. Open the project root in Android Studio (Koala/2024.1+) and let it
-   sync — it's a standard Gradle Android project (AGP 8.6, Kotlin 2.0,
-   Compose). `./gradlew assembleDebug` builds cleanly from the command
-   line too, and `./gradlew testDebugUnitTest` runs the JVM-level unit
-   tests (IPv4/TCP codec, CA/leaf certificate signing, and the UI
-   layer's pure logic).
+   sync — it's a multi-module Gradle Android project (`:app` +
+   `:dynamic-features:gecko_engine`; AGP 8.6, Kotlin 2.0, Compose).
+   `./gradlew assembleDebug` builds cleanly from the command line too,
+   and `./gradlew testDebugUnitTest` runs the JVM-level unit tests
+   (IPv4/TCP codec, CA/leaf certificate signing, a real Netty TLS
+   handshake, and the UI layer's pure logic).
 2. Run the `app` module on a device or emulator running API 31+ (the
    AICore on-device provider's own client library sets that floor).
 3. In-app, use the three tabs at the bottom: **Chat** to pick/switch an

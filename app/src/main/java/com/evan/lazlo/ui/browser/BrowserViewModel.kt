@@ -5,7 +5,9 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.evan.lazlo.browser.BrowserEngineLoader
 import com.evan.lazlo.browser.EngineKind
+import com.evan.lazlo.browser.GeckoModuleState
 import com.evan.lazlo.core.Settings
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -21,6 +23,8 @@ data class BrowserUiState(
     val canGoBack: Boolean = false,
     val canGoForward: Boolean = false,
     val showEnginePicker: Boolean = false,
+    /** Non-null only while switching to GeckoView requires downloading its dynamic feature module first. */
+    val geckoModuleState: GeckoModuleState? = null,
 )
 
 private const val START_PAGE = "https://duckduckgo.com/"
@@ -28,6 +32,7 @@ private const val START_PAGE = "https://duckduckgo.com/"
 class BrowserViewModel(application: Application) : AndroidViewModel(application) {
 
     private val settings = Settings(application)
+    val browserEngineLoader = BrowserEngineLoader(application)
 
     private val _uiState = MutableStateFlow(BrowserUiState(addressBarText = START_PAGE))
     val uiState: StateFlow<BrowserUiState> = _uiState.asStateFlow()
@@ -35,7 +40,16 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     init {
         viewModelScope.launch {
             val kind = settings.browserEngine()
-            _uiState.update { it.copy(engineKind = kind) }
+            // GeckoView was picked in a previous session but its module
+            // isn't installed this time (a fresh install, cleared data,
+            // or the OS uninstalled an unused split) — fall back to
+            // Chromium rather than silently failing to render anything.
+            val usable = if (kind == EngineKind.GECKO && !browserEngineLoader.isGeckoModuleInstalled()) {
+                EngineKind.CHROMIUM
+            } else {
+                kind
+            }
+            _uiState.update { it.copy(engineKind = usable) }
         }
     }
 
@@ -47,8 +61,36 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             _uiState.update { it.copy(showEnginePicker = false) }
             return
         }
+        _uiState.update { it.copy(showEnginePicker = false) }
+
+        if (kind == EngineKind.GECKO && !browserEngineLoader.isGeckoModuleInstalled()) {
+            startGeckoModuleInstall()
+            return
+        }
+
+        applyEngine(kind)
+    }
+
+    private fun applyEngine(kind: EngineKind) {
         viewModelScope.launch { settings.setBrowserEngine(kind) }
-        _uiState.update { it.copy(engineKind = kind, showEnginePicker = false) }
+        _uiState.update { it.copy(engineKind = kind, geckoModuleState = null) }
+    }
+
+    private fun startGeckoModuleInstall() {
+        _uiState.update { it.copy(geckoModuleState = GeckoModuleState.NotInstalled) }
+        viewModelScope.launch {
+            launch {
+                browserEngineLoader.installState().collect { state ->
+                    _uiState.update { it.copy(geckoModuleState = state) }
+                    if (state is GeckoModuleState.Installed) applyEngine(EngineKind.GECKO)
+                }
+            }
+            browserEngineLoader.requestInstall()
+        }
+    }
+
+    fun dismissGeckoModuleInstall() {
+        _uiState.update { it.copy(geckoModuleState = null) }
     }
 
     fun setEnginePickerVisible(visible: Boolean) {

@@ -2,6 +2,7 @@ package com.evan.lazlo.proxy.net
 
 import android.os.ParcelFileDescriptor
 import com.evan.lazlo.proxy.TrafficEntry
+import io.netty.channel.nio.NioEventLoopGroup
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -59,6 +60,13 @@ class TcpIpStack(
     private val udpSockets = ConcurrentHashMap<FlowKey, DatagramSocket>()
     private val random = SecureRandom()
 
+    // Shared across every flow this stack ever relays — one small event
+    // loop rather than one per connection. NETTY_THREADS is deliberately
+    // modest: this is a client-side proxy for one device's own traffic,
+    // not a server sized for concurrent load.
+    private val eventLoopGroup = NioEventLoopGroup(NETTY_THREADS)
+    private val connectionRelay = ConnectionRelay(eventLoopGroup)
+
     @Volatile private var running = true
 
     suspend fun pump() {
@@ -89,6 +97,7 @@ class TcpIpStack(
         flows.clear()
         udpSockets.values.forEach { runCatching { it.close() } }
         udpSockets.clear()
+        connectionRelay.shutdown()
         runCatching { input.close() }
         runCatching { output.close() }
     }
@@ -140,7 +149,7 @@ class TcpIpStack(
         val destinationAddress = flow.key.destinationAddress.toIpBytes()
         flow.relayJob = scope.launch(Dispatchers.IO) {
             try {
-                ConnectionRelay.relay(
+                connectionRelay.relay(
                     flow = flow,
                     destinationAddress = destinationAddress,
                     destinationPort = destinationPort,
@@ -289,5 +298,6 @@ class TcpIpStack(
         const val MAX_SEGMENT_SIZE = 1400 // safely under a typical TUN's MTU minus headers
         const val RECEIVE_WINDOW = 65535
         const val UDP_IDLE_TIMEOUT_MS = 30_000
+        const val NETTY_THREADS = 2
     }
 }
