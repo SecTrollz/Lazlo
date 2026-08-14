@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Deliberately empty: allowBackup is false at the manifest level (see
+  AndroidManifest.xml) so this file has nothing to include. Present only
+  because the platform template expects a target for android:fullBackupContent.
+-->
+<full-backup-content />

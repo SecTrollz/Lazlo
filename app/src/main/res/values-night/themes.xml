@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <style name="Theme.Lazlo" parent="android:Theme.Material.NoActionBar">
+        <item name="android:statusBarColor" tools:targetApi="l">@color/lazlo_ink</item>
+        <item name="android:windowBackground">@color/lazlo_ink</item>
+    </style>
+</resources>

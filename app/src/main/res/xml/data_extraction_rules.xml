@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 12+ (API 31) equivalent of backup_rules.xml. Cloud backup and
+  device-to-device transfer are both left with nothing to move — secrets
+  (API keys, the local MITM CA's private key) live only in Android
+  Keystore-backed storage, which is excluded by the platform by default.
+-->
+<data-extraction-rules>
+    <cloud-backup />
+    <device-transfer />
+</data-extraction-rules>
