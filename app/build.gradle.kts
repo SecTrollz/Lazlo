@@ -38,13 +38,9 @@ android {
 
     packaging {
         resources {
-            // Every io.netty:* jar ships its own META-INF/INDEX.LIST
-            // (a JAR indexing file with no purpose in an APK); merging
-            // fails on the duplicate unless it's excluded explicitly.
-            excludes += "META-INF/INDEX.LIST"
-            excludes += "META-INF/io.netty.versions.properties"
             // The three org.bouncycastle:*-jdk18on jars are multi-release
-            // and all carry an identical OSGi manifest fragment.
+            // and all carry an identical OSGi manifest fragment; merging
+            // fails on the duplicate unless it's excluded explicitly.
             excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
         }
     }
@@ -75,16 +71,10 @@ dependencies {
     implementation("org.mozilla.geckoview:geckoview:130.0.20240913135723") // TODO: split into a Play Feature Delivery module
 
     // -- proxy / inspector --
-    // netty-all pulls in desktop-only native epoll/kqueue transport jars
-    // that duplicate META-INF/INDEX.LIST and aren't usable on Android
-    // anyway (Android uses NIO), so depend on just the modules this
-    // component actually needs instead of the "all" aggregate.
-    implementation("io.netty:netty-common:4.1.110.Final")
-    implementation("io.netty:netty-buffer:4.1.110.Final")
-    implementation("io.netty:netty-transport:4.1.110.Final")
-    implementation("io.netty:netty-codec:4.1.110.Final")
-    implementation("io.netty:netty-codec-http:4.1.110.Final")
-    implementation("io.netty:netty-handler:4.1.110.Final")
+    // No Netty: the packet pump (proxy/net/TcpIpStack.kt) is a small
+    // hand-written IPv4/TCP codec, and TLS termination bridges through a
+    // real loopback SSLSocket/SSLServerSocket pair rather than a Netty
+    // pipeline — see ARCHITECTURE.md for why.
     implementation("org.bouncycastle:bcpkix-jdk18on:1.78.1")
 
     testImplementation("junit:junit:4.13.2")

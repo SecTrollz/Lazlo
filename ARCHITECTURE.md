@@ -88,17 +88,38 @@ regardless of engine.
 
 Standard on-device MITM pattern, same one ProxyPin/HttpCanary/PCAPdroid use:
 
-1. **CertificateAuthority** — generates a device-local root CA (BouncyCastle,
-   4096-bit RSA or P-384 EC) on first run, stored in Keystore. Exports the
-   public cert for the user to install via Settings → user CA store
+1. **CertificateAuthority** — generates a device-local root CA (BouncyCastle
+   builds the certificate; the 4096-bit RSA key itself is generated
+   *inside* Android Keystore with `PURPOSE_SIGN` only, non-extractable,
+   hardware/TEE-backed where the device supports it — see the class doc
+   for exactly how a real `BasicConstraints`/`KeyUsage`-bearing CA
+   certificate gets attached to a Keystore-native key, since Keystore's
+   own auto-generated placeholder cert can't function as a CA). Exports
+   the public cert for the user to install via Settings → user CA store
    (requires explicit OS-level confirmation — the app cannot auto-install
    a trusted root).
-2. **MitmVpnService** — a local-loopback `VpnService` that routes the
-   device's traffic through an embedded proxy (Netty + a MITM layer that
-   re-signs each host's leaf cert on the fly using the local CA).
-   TLS is terminated locally only — nothing is forwarded to any
-   third-party relay.
-3. **Traffic log** — in-memory ring buffer (optionally persisted to an
+2. **LeafCertificateFactory** — mints and caches a fresh leaf certificate
+   per hostname on the fly, signed by the CA's Keystore-backed key, with
+   proper `SubjectAlternativeName`/`ExtendedKeyUsage` extensions. This is
+   the actual "MITM" step: a client that trusts the CA cert above accepts
+   this leaf for that host without complaint.
+3. **`proxy/net/` — the packet pump** — `TcpIpStack` reads raw IPv4
+   packets off the VPN's TUN fd, drives a minimal per-flow TCP state
+   machine (`TcpFlow`/`IpV4Packet`/`TcpSegment`/`UdpDatagram`), and hands
+   each ESTABLISHED flow to `ConnectionRelay`: TLS termination + a real
+   upstream TLS connection on :443 (bridged through a real loopback
+   `SSLServerSocket`/`SSLSocket` pair using the leaf from
+   `LeafCertificateFactory`, rather than a hand-rolled `SSLEngine`
+   driver), a plain relay on :80, or raw passthrough on any other port
+   so the rest of the device's traffic keeps working. UDP (mainly DNS)
+   is passed straight through, unparsed. Every upstream socket is routed
+   through `VpnService.protect()` first — without that, the interceptor's
+   own outbound connections would loop back into its own VPN routes.
+4. **MitmVpnService** — the local-loopback `VpnService` that owns the TUN
+   interface and drives `TcpIpStack`'s `pump()`/`shutdown()` across its
+   lifecycle. TLS is terminated locally only — nothing is forwarded to
+   any third-party relay.
+5. **Traffic log** — in-memory ring buffer (optionally persisted to an
    encrypted local Room DB, off by default) of method/host/path/status/
    size, viewable in a Compose screen. No export path unless the user
    explicitly taps "export" (writes a local file, no network send).
@@ -106,6 +127,22 @@ Standard on-device MITM pattern, same one ProxyPin/HttpCanary/PCAPdroid use:
 This only intercepts traffic from the device it runs on, and only after
 the user installs the generated CA themselves — it can't be pointed at
 someone else's traffic.
+
+**Scope note on the packet pump specifically:** `TcpIpStack` targets *one
+local, well-behaved TCP peer* — the device's own apps talking through a
+VPN TUN — not a general-purpose internet-facing TCP/IP stack. An
+out-of-order segment is dropped rather than buffered and reordered (the
+sending app's own TCP stack retransmits, same as after any other dropped
+packet); there's no congestion control, window scaling, or SACK. That's
+a deliberate simplification appropriate to this app's actual job, not an
+oversight. The IPv4/TCP codec and the certificate-signing logic both
+have JVM unit tests (`app/src/test/`) and are verified by them; the TUN
+read/write loop, the VPN-consent flow, and the loopback TLS bridge are
+only verifiable on a real device or emulator — none of that could be
+exercised in the sandbox this was built in, so treat `TcpIpStack` and
+`ConnectionRelay` as needing real on-device testing before depending on
+them, even though they compile clean and the pieces that can be tested
+off-device pass.
 
 ### 4. `core/` — settings & secrets
 
@@ -137,26 +174,20 @@ dependencies {
     // own Maven repo (https://maven.mozilla.org/maven2/) — add that
     // repository alongside google()/mavenCentral() in settings.gradle.kts.
     implementation "org.mozilla.geckoview:geckoview:130.0.20240913135723" // as dynamic feature module
-    // netty-all drags in desktop-only native epoll/kqueue jars that
-    // collide on META-INF/INDEX.LIST inside an APK; depend on the
-    // individual modules actually used instead.
-    implementation "io.netty:netty-common:4.1.110.Final"
-    implementation "io.netty:netty-buffer:4.1.110.Final"
-    implementation "io.netty:netty-transport:4.1.110.Final"
-    implementation "io.netty:netty-codec:4.1.110.Final"
-    implementation "io.netty:netty-codec-http:4.1.110.Final"
-    implementation "io.netty:netty-handler:4.1.110.Final"
+    // No Netty: proxy/net/TcpIpStack.kt is a small hand-written IPv4/TCP
+    // codec, and TLS termination bridges through a real loopback
+    // SSLSocket/SSLServerSocket pair — see proxy/'s section above.
     implementation "org.bouncycastle:bcpkix-jdk18on:1.78.1"
 }
 ```
 
-Two packaging notes that fall out of the above, both already handled in
+Two things worth knowing about the above, both already handled in
 `app/build.gradle.kts`:
 
-- Every `io.netty:*` jar ships an identical `META-INF/INDEX.LIST`, and the
-  three `org.bouncycastle:*-jdk18on` jars all ship the same multi-release
-  OSGi manifest fragment. Both need excluding in `packaging { resources {
-  excludes += ... } }` or `mergeDebugJavaResource` fails on the duplicate.
+- The three `org.bouncycastle:*-jdk18on` jars all ship the same
+  multi-release OSGi manifest fragment; it needs excluding in
+  `packaging { resources { excludes += ... } }` or
+  `mergeDebugJavaResource` fails on the duplicate.
 - The AICore client library itself requires `minSdk 31` (its manifest
   declares that floor), which sets the floor for the whole app.
 
@@ -171,15 +202,33 @@ Two packaging notes that fall out of the above, both already handled in
 
 ## Current state
 
-This repository currently holds the scaffolding described above: the
-four modules with their interfaces and a working (but UI-light)
-implementation per class, a `MainActivity` that wires a `BrowserEngine`
-tab, the engine/inspector toggles, and the VPN-consent flow together, and
-the Gradle project shell needed to open and build it in Android Studio.
-`./gradlew assembleDebug` succeeds against this tree (compileSdk 35,
-minSdk 31) — see the packaging notes above for the two dependency quirks
-that needed working around to get there.
-The two heaviest pieces — `TrafficInterceptor`'s actual packet pump and
-`CertificateAuthority`'s Keystore-backed private key storage — are left
-as documented skeletons; see the build-out order above for what to
-tackle first.
+This repository holds the four modules with their interfaces and a
+working implementation per class, a `MainActivity` that wires a
+`BrowserEngine` tab, the engine/inspector toggles, and the VPN-consent
+flow together, and the Gradle project shell needed to open and build it
+in Android Studio. `./gradlew assembleDebug` succeeds against this tree
+(compileSdk 35, minSdk 31), and `./gradlew testDebugUnitTest` runs and
+passes the JVM-level unit tests under `app/src/test/` (the IPv4/TCP
+codec and the CA/leaf certificate-signing logic).
+
+What were previously the two heaviest documented skeletons are now real
+implementations, not stubs:
+
+- **`CertificateAuthority`'s Keystore-backed private key** — the CA's
+  RSA key is generated inside Android Keystore itself
+  (`PURPOSE_SIGN`-only, non-extractable), and `LeafCertificateFactory`
+  mints real per-host leaf certificates signed by it.
+- **`TrafficInterceptor`'s packet pump** (`proxy/net/`) — a real IPv4/TCP
+  parser and per-flow TCP state machine reading off the VPN's TUN fd,
+  wired to a real TLS-terminating relay via a loopback
+  `SSLServerSocket`/`SSLSocket` bridge.
+
+Both are implemented for real and compile-verified, and the pieces with
+no Android/VPN dependency (the codec, the certificate signing) are
+covered by passing JVM unit tests. What none of that testing covers —
+because it can't be exercised outside a real Android device or
+emulator — is the actual TUN read/write loop, the VPN-consent flow, and
+the loopback TLS bridge under real traffic. Treat those as implemented
+but **not yet validated on-device**, and budget for an on-device pass
+(a real HTTPS request through the inspector, watched in Android Studio's
+debugger/logcat) before trusting this for anything beyond development.
