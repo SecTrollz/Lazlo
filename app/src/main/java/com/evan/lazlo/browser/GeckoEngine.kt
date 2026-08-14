@@ -2,6 +2,7 @@ package com.evan.lazlo.browser
 
 import android.content.Context
 import android.view.ViewGroup
+import org.mozilla.geckoview.ContentBlocking
 import org.mozilla.geckoview.GeckoRuntime
 import org.mozilla.geckoview.GeckoRuntimeSettings
 import org.mozilla.geckoview.GeckoSession
@@ -25,10 +26,14 @@ class GeckoEngine(private val context: Context) : BrowserEngine {
             runtime ?: GeckoRuntime.create(
                 ctx,
                 GeckoRuntimeSettings.Builder()
-                    .trackingProtectionCategories(
-                        GeckoRuntimeSettings.TrackingProtection.CATEGORY_AD or
-                        GeckoRuntimeSettings.TrackingProtection.CATEGORY_ANALYTIC or
-                        GeckoRuntimeSettings.TrackingProtection.CATEGORY_SOCIAL
+                    .contentBlocking(
+                        ContentBlocking.Settings.Builder()
+                            .antiTracking(
+                                ContentBlocking.AntiTracking.AD or
+                                ContentBlocking.AntiTracking.ANALYTIC or
+                                ContentBlocking.AntiTracking.SOCIAL
+                            )
+                            .build()
                     )
                     .build()
             ).also { runtime = it }

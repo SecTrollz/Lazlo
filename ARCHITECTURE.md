@@ -132,11 +132,33 @@ dependencies {
     implementation "androidx.datastore:datastore-preferences:1.1.1"
     implementation "androidx.security:security-crypto:1.1.0-alpha06"
     implementation "com.google.mediapipe:tasks-genai:0.10.14"
-    implementation "org.mozilla.geckoview:geckoview:130.0" // as dynamic feature module
-    implementation "io.netty:netty-all:4.1.110.Final"
+    implementation "com.google.ai.edge.aicore:aicore:0.0.1-exp02"
+    // GeckoView is date-stamped, not plain semver, and lives on Mozilla's
+    // own Maven repo (https://maven.mozilla.org/maven2/) — add that
+    // repository alongside google()/mavenCentral() in settings.gradle.kts.
+    implementation "org.mozilla.geckoview:geckoview:130.0.20240913135723" // as dynamic feature module
+    // netty-all drags in desktop-only native epoll/kqueue jars that
+    // collide on META-INF/INDEX.LIST inside an APK; depend on the
+    // individual modules actually used instead.
+    implementation "io.netty:netty-common:4.1.110.Final"
+    implementation "io.netty:netty-buffer:4.1.110.Final"
+    implementation "io.netty:netty-transport:4.1.110.Final"
+    implementation "io.netty:netty-codec:4.1.110.Final"
+    implementation "io.netty:netty-codec-http:4.1.110.Final"
+    implementation "io.netty:netty-handler:4.1.110.Final"
     implementation "org.bouncycastle:bcpkix-jdk18on:1.78.1"
 }
 ```
+
+Two packaging notes that fall out of the above, both already handled in
+`app/build.gradle.kts`:
+
+- Every `io.netty:*` jar ships an identical `META-INF/INDEX.LIST`, and the
+  three `org.bouncycastle:*-jdk18on` jars all ship the same multi-release
+  OSGi manifest fragment. Both need excluding in `packaging { resources {
+  excludes += ... } }` or `mergeDebugJavaResource` fails on the duplicate.
+- The AICore client library itself requires `minSdk 31` (its manifest
+  declares that floor), which sets the floor for the whole app.
 
 ## Build-out order
 
@@ -154,6 +176,9 @@ four modules with their interfaces and a working (but UI-light)
 implementation per class, a `MainActivity` that wires a `BrowserEngine`
 tab, the engine/inspector toggles, and the VPN-consent flow together, and
 the Gradle project shell needed to open and build it in Android Studio.
+`./gradlew assembleDebug` succeeds against this tree (compileSdk 35,
+minSdk 31) — see the packaging notes above for the two dependency quirks
+that needed working around to get there.
 The two heaviest pieces — `TrafficInterceptor`'s actual packet pump and
 `CertificateAuthority`'s Keystore-backed private key storage — are left
 as documented skeletons; see the build-out order above for what to

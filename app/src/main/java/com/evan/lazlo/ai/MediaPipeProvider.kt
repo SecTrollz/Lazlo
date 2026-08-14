@@ -25,11 +25,19 @@ class MediaPipeProvider(
 
     private var engine: LlmInference? = null
 
+    // The MediaPipe API takes its result listener once, at engine
+    // creation, rather than per call — so a single shared listener
+    // forwards to whichever streamChat() collector is currently active.
+    // Fine for this app's one-conversation-at-a-time chat UI; a second
+    // concurrent stream would need a request-queue instead.
+    private var activeListener: ((partial: String, done: Boolean) -> Unit)? = null
+
     override suspend fun isReady(): Boolean = runCatching {
         if (File(modelPath).exists() && engine == null) {
             val options = LlmInferenceOptions.builder()
                 .setModelPath(modelPath)
                 .setMaxTokens(1024)
+                .setResultListener { partial, done -> activeListener?.invoke(partial, done) }
                 .build()
             engine = LlmInference.createFromOptions(context, options)
         }
@@ -41,10 +49,11 @@ class MediaPipeProvider(
         ?: throw IllegalStateException("Local model not loaded: $modelPath")
 
         val prompt = history.joinToString("\n\n") { "${it.role}: ${it.content}" }
-        e.generateResponseAsync(prompt) { partial, done ->
+        activeListener = { partial, done ->
             trySend(ChatToken(partial, isFinal = done))
             if (done) close()
         }
-        awaitClose { /* engine session cleanup if the API exposes cancel() */ }
+        e.generateResponseAsync(prompt)
+        awaitClose { activeListener = null }
     }
 }

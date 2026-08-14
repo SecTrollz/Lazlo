@@ -10,7 +10,7 @@ android {
 
     defaultConfig {
         applicationId = "com.evan.lazlo"
-        minSdk = 26 // AICore / on-device GenAI and adaptive icons both want 26+
+        minSdk = 31 // the AICore client library itself requires API 31+
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
@@ -35,6 +35,19 @@ android {
     buildFeatures {
         compose = true
     }
+
+    packaging {
+        resources {
+            // Every io.netty:* jar ships its own META-INF/INDEX.LIST
+            // (a JAR indexing file with no purpose in an APK); merging
+            // fails on the duplicate unless it's excluded explicitly.
+            excludes += "META-INF/INDEX.LIST"
+            excludes += "META-INF/io.netty.versions.properties"
+            // The three org.bouncycastle:*-jdk18on jars are multi-release
+            // and all carry an identical OSGi manifest fragment.
+            excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
+        }
+    }
 }
 
 dependencies {
@@ -52,10 +65,7 @@ dependencies {
 
     // -- ai backends --
     implementation("com.google.mediapipe:tasks-genai:0.10.14")
-    // AICore / on-device Gemini Nano client — kept as a compile-time
-    // placeholder dependency; swap for the shipping artifact coordinate
-    // once it's out of restricted release.
-    // implementation("com.google.ai.edge.aicore:aicore:<version>")
+    implementation("com.google.ai.edge.aicore:aicore:0.0.1-exp02")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.json:json:20240303")
 
@@ -65,7 +75,16 @@ dependencies {
     implementation("org.mozilla.geckoview:geckoview:130.0.20240913135723") // TODO: split into a Play Feature Delivery module
 
     // -- proxy / inspector --
-    implementation("io.netty:netty-all:4.1.110.Final")
+    // netty-all pulls in desktop-only native epoll/kqueue transport jars
+    // that duplicate META-INF/INDEX.LIST and aren't usable on Android
+    // anyway (Android uses NIO), so depend on just the modules this
+    // component actually needs instead of the "all" aggregate.
+    implementation("io.netty:netty-common:4.1.110.Final")
+    implementation("io.netty:netty-buffer:4.1.110.Final")
+    implementation("io.netty:netty-transport:4.1.110.Final")
+    implementation("io.netty:netty-codec:4.1.110.Final")
+    implementation("io.netty:netty-codec-http:4.1.110.Final")
+    implementation("io.netty:netty-handler:4.1.110.Final")
     implementation("org.bouncycastle:bcpkix-jdk18on:1.78.1")
 
     testImplementation("junit:junit:4.13.2")

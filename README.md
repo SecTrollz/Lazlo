@@ -83,8 +83,10 @@ build-out order.
 
 1. Open the project root in Android Studio (Koala/2024.1+) and let it
    sync — it's a standard Gradle Android project (AGP 8.6, Kotlin 2.0,
-   Compose).
-2. Run the `app` module on a device or emulator running API 26+.
+   Compose). `./gradlew assembleDebug` builds cleanly from the command
+   line too.
+2. Run the `app` module on a device or emulator running API 31+ (the
+   AICore on-device provider's own client library sets that floor).
 3. In-app: pick a browser engine, optionally add an API key or point at
    a local model file for chat, and toggle the inspector if you want to
    see the app's own outbound traffic (this will prompt the standard

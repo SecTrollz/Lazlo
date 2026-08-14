@@ -40,6 +40,7 @@ class MainActivity : ComponentActivity() {
         setContent { LazloRoot() }
     }
 
+    @OptIn(ExperimentalMaterial3Api::class)
     @Composable
     private fun LazloRoot() {
         val scope = rememberCoroutineScope()
