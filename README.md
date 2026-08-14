@@ -119,11 +119,21 @@ own independently-stored key, so you can bring a key for either (or
 both) — OpenRouter defaults to GPT-4o but routes to whatever model you
 configure.
 
+The Browser tab is a real multi-tab browser now, not a single bare
+WebView: tabs, history, bookmarks, and downloads (handed to Android's
+own Downloads), all on-device only. And the security hardening added
+last round got a pass for being a *power-user* tool: screenshot/
+recording protection is a real on/off toggle now (not a hard lock), and
+the network config went back to allowing cleartext browsing and trusting
+user-installed CAs — including the inspector's own — so this stays
+usable for actual security research instead of quietly losing
+capability in the name of "secure by default."
+
 The pure logic across all of this (the IPv4/TCP codec, certificate
 signing, the Netty handshake, message-transcript folding, traffic-log
 formatting, address-bar resolution, backend/engine copy, AICore error
-diagnosis, BYOK request/response shaping) is covered by 64 passing JVM
-unit tests; see
+diagnosis, BYOK request/response shaping, browser history/bookmarks
+codec) is covered by 68 passing JVM unit tests; see
 [`ARCHITECTURE.md`](ARCHITECTURE.md#5-ui--the-three-screens).
 
 What's *not* yet fully proven out is the GeckoView module's actual

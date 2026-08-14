@@ -19,6 +19,8 @@ class GeckoEngine(private val context: Context) : BrowserEngine {
     override val kind = EngineKind.GECKO
     override var onUrlChanged: ((String) -> Unit)? = null
     override var onLoadingChanged: ((Boolean) -> Unit)? = null
+    override var onTitleChanged: ((String) -> Unit)? = null
+    override var onDownloadRequested: ((DownloadRequest) -> Unit)? = null
     private var geckoView: GeckoView? = null
     private var session: GeckoSession? = null
 
@@ -75,6 +77,23 @@ class GeckoEngine(private val context: Context) : BrowserEngine {
 
             override fun onPageStop(session: GeckoSession, success: Boolean) {
                 onLoadingChanged?.invoke(false)
+            }
+        }
+        sess.contentDelegate = object : GeckoSession.ContentDelegate {
+            override fun onTitleChange(session: GeckoSession, title: String?) {
+                title?.let { onTitleChanged?.invoke(it) }
+            }
+
+            // Fired for a response GeckoView won't render itself — a file
+            // download, same trigger as WebView's setDownloadListener.
+            override fun onExternalResponse(session: GeckoSession, response: org.mozilla.geckoview.WebResponse) {
+                onDownloadRequested?.invoke(
+                    DownloadRequest(
+                        url = response.uri,
+                        contentDisposition = response.headers["content-disposition"],
+                        mimeType = response.headers["content-type"],
+                    ),
+                )
             }
         }
         sess.open(runtime(context))

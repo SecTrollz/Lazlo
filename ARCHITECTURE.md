@@ -139,6 +139,23 @@ route their network layer through the same local proxy port when the
 inspector is enabled (see below), so traffic capture works identically
 regardless of engine.
 
+**This is a real multi-tab browser, not a single bare WebView surface**:
+a tab strip (open/close/switch tabs), history, bookmarks (star icon next
+to the address bar), and downloads (handed off to Android's own
+`DownloadManager` — both `ChromiumEngine` via `setDownloadListener` and
+`GeckoEngine` via `GeckoSession.ContentDelegate.onExternalResponse` adapt
+their native download hook into the same `DownloadRequest` shape). All
+four are backed by `BrowserDataStore` (`core/BrowserDataStore.kt`,
+JSON-encoded via the pure, unit-tested `BrowserRecordCodec`) — on-device
+only, no sync, no account. One deliberate trade-off: tabs are lightweight
+(a URL + a title), not independent live engine sessions — switching tabs
+re-navigates the single shared engine instance rather than keeping N
+native WebView/GeckoView instances resident at once. That's the same
+trade-off already made for engine switching (below), extended to tabs
+for the same reason: a GeckoView session is expensive to keep alive, and
+true per-tab process isolation isn't needed to be a real multi-tab
+browser day to day.
+
 **What's verified vs. not here:** the module split itself, the manifest
 attributes, and the reflection-based loading all compile and were
 confirmed by inspecting real build output (the APK-size drop above). The
@@ -270,7 +287,12 @@ can observe its contents:
   banking apps and Android's own "Secure Folder" rely on. It cannot stop
   a device already compromised by a malicious Accessibility Service
   reading the view hierarchy directly — no app-level flag can — but it
-  closes every capture path a normal app has available to it.
+  closes every capture path a normal app has available to it. It's a
+  real toggle, not a hard lock — on by default, surfaced in the
+  Inspector tab (`Settings.screenshotProtectionFlow`) — because a power
+  user doing security research legitimately needs to screenshot or
+  record their own findings sometimes; `MainActivity` collects the
+  setting live so switching it takes effect immediately, no restart.
 - **No exported components beyond the launcher.** `MainActivity` is the
   only `exported="true"` entry point (required for the launcher
   intent-filter to work at all); the VPN service is `exported="false"`
@@ -283,16 +305,22 @@ can observe its contents:
   (settings, chat history, the local MITM CA) is eligible for cloud
   backup or device-to-device transfer, so it can't leak through a Google
   account or a phone-migration tool.
-- **Explicit `network_security_config.xml`**: no cleartext traffic
-  (applies to this app's own network calls *and* to WebView — a page a
-  user browses to over `http://` simply won't load, so nothing routes in
-  the clear on a hostile network), and only OS-shipped CAs are trusted
-  roots. That second part matters specifically for this app: the traffic
-  inspector mints its own local MITM CA to decrypt-and-reinspect *other*
-  apps' connections, and that CA is deliberately never added as a trust
-  anchor here, so Lazlo's own outbound connections (BYOK API calls, its
-  own browsing) can never be intercepted by its own inspector, or by
-  anything else with a user/admin-installed certificate on the device.
+- **`network_security_config.xml`** deliberately stays close to the
+  platform default rather than locking further down, because this is a
+  power-user security/research tool, not a consumer app: cleartext
+  traffic is allowed (blocking `http://` wouldn't add any real
+  protection — the inspector already sees the traffic either way via the
+  VPN capture layer below — it would only break the browser for exactly
+  the kind of page a researcher is likely to want to load), and both
+  system *and user-installed* CAs are trusted. That second part matters
+  specifically for this app: it means the inspector's own installed CA
+  can also decrypt-and-log *Lazlo's own* traffic (BYOK calls, its own
+  browsing), not just every other app's, and it means Lazlo can be
+  chained underneath another MITM tool (Burp, mitmproxy, PCAPdroid) the
+  user already runs — the same way any of those tools' own companion
+  browsers work. An earlier version of this file trusted only system CAs
+  and blocked cleartext outright; that was a real regression for a tool
+  in this category, caught and reverted rather than left in.
 - **Secrets never touch the clipboard or logs.** There is no
   copy-to-clipboard path for API keys anywhere in the app, and nothing
   logs message content, keys, or intercepted traffic bodies via `Log.*`
@@ -441,14 +469,16 @@ one-line Compose host, not where the app's logic lives. `gradle
 31) and now also builds `:dynamic-features:gecko_engine` as a genuinely
 separate on-demand module (confirmed by inspecting the resulting base
 APK's contents, not just by the build succeeding). `gradle
-:app:testDebugUnitTest` runs and passes 64 JVM-level unit tests under
+:app:testDebugUnitTest` runs and passes 68 JVM-level unit tests under
 `app/src/test/`: the IPv4/TCP codec, the CA/leaf certificate-signing
 logic, a real end-to-end TLS handshake against the Netty MITM pipeline
 (`NettyTlsTerminationTest`), AICore's error-code-to-plain-language
 diagnosis (`AiCoreDiagnosisTest`), the Anthropic/OpenRouter BYOK request
-and response shaping (`ApiKeyProviderConfigTest`), and the `ui/` layer's
-pure logic (chat transcript folding, traffic-log formatting, address-bar
-URL/search resolution, the backend/engine explainer copy).
+and response shaping (`ApiKeyProviderConfigTest`), the browser
+history/bookmarks/downloads JSON codec (`BrowserRecordCodecTest`), and
+the `ui/` layer's pure logic (chat transcript folding, traffic-log
+formatting, address-bar URL/search resolution, the backend/engine
+explainer copy).
 
 What were previously the two heaviest documented skeletons are real
 implementations, not stubs:
