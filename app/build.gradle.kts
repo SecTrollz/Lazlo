@@ -36,11 +36,24 @@ android {
         compose = true
     }
 
+    // GeckoView lives in dynamic-features/gecko-engine/ instead of a
+    // plain dependency here — see that module's build.gradle.kts and
+    // BrowserEngineLoader.kt for why (it's ~30-50MB on its own). The
+    // Gradle project's logical name (and therefore this path) is
+    // gecko_engine, not gecko-engine — see the rename in
+    // settings.gradle.kts for why: Android feature module names can't
+    // contain hyphens.
+    dynamicFeatures += setOf(":dynamic-features:gecko_engine")
+
     packaging {
         resources {
+            // Every io.netty:* jar ships its own META-INF/INDEX.LIST (a
+            // JAR indexing file with no purpose in an APK); merging fails
+            // on the duplicate unless it's excluded explicitly.
+            excludes += "META-INF/INDEX.LIST"
+            excludes += "META-INF/io.netty.versions.properties"
             // The three org.bouncycastle:*-jdk18on jars are multi-release
-            // and all carry an identical OSGi manifest fragment; merging
-            // fails on the duplicate unless it's excluded explicitly.
+            // and all carry an identical OSGi manifest fragment.
             excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
         }
     }
@@ -57,7 +70,9 @@ dependencies {
     implementation(platform("androidx.compose:compose-bom:2024.09.02"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.compose.ui:ui-tooling-preview")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.6")
 
     // -- ai backends --
     implementation("com.google.mediapipe:tasks-genai:0.10.14")
@@ -66,15 +81,28 @@ dependencies {
     implementation("org.json:json:20240303")
 
     // -- browser engine --
-    // GeckoView ships date-stamped versions from Mozilla's own Maven repo
-    // (declared in settings.gradle.kts) rather than plain semver.
-    implementation("org.mozilla.geckoview:geckoview:130.0.20240913135723") // TODO: split into a Play Feature Delivery module
+    // No GeckoView dependency here on purpose: it lives in the
+    // dynamic-features/gecko-engine module (see settings.gradle.kts and
+    // that module's build.gradle.kts) and is loaded on demand via
+    // Play Feature Delivery — see BrowserEngineLoader.kt.
+    implementation("com.google.android.play:feature-delivery:2.1.0")
+    implementation("com.google.android.play:feature-delivery-ktx:2.1.0")
 
     // -- proxy / inspector --
-    // No Netty: the packet pump (proxy/net/TcpIpStack.kt) is a small
-    // hand-written IPv4/TCP codec, and TLS termination bridges through a
-    // real loopback SSLSocket/SSLServerSocket pair rather than a Netty
-    // pipeline — see ARCHITECTURE.md for why.
+    // netty-all pulls in desktop-only native epoll/kqueue transport jars
+    // that duplicate META-INF/INDEX.LIST inside an APK and aren't usable
+    // on Android anyway (Android uses plain NIO), so depend on the
+    // individual modules the embedded proxy (proxy/net/ConnectionRelay.kt)
+    // actually needs instead of the "all" aggregate.
+    implementation("io.netty:netty-common:4.1.110.Final")
+    implementation("io.netty:netty-buffer:4.1.110.Final")
+    implementation("io.netty:netty-transport:4.1.110.Final")
+    implementation("io.netty:netty-codec:4.1.110.Final")
+    implementation("io.netty:netty-handler:4.1.110.Final")
+    // Real HTTP/1.x parsing for RewriteEngine (proxy/net/RewriteEngine.kt)
+    // — request/response rewrite rules operate on actually-decoded
+    // HttpRequest/HttpResponse objects, not regex-on-bytes.
+    implementation("io.netty:netty-codec-http:4.1.110.Final")
     implementation("org.bouncycastle:bcpkix-jdk18on:1.78.1")
 
     testImplementation("junit:junit:4.13.2")

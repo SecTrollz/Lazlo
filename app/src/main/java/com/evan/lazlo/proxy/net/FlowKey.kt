@@ -37,3 +37,6 @@ fun Int.toIpBytes(): ByteArray = byteArrayOf(
     (this ushr 8).toByte(),
     this.toByte(),
 )
+
+/** Dotted-quad string form, e.g. for labeling traffic-log entries that only have the packed int on hand. */
+fun Int.toIpString(): String = toIpBytes().joinToString(".") { (it.toInt() and 0xFF).toString() }

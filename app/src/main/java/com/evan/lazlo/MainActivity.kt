@@ -1,136 +1,54 @@
 package com.evan.lazlo
 
-import android.content.Intent
 import android.os.Bundle
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.layout.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
-import com.evan.lazlo.ai.AiProviderFactory
-import com.evan.lazlo.browser.ChromiumEngine
-import com.evan.lazlo.browser.EngineKind
-import com.evan.lazlo.browser.GeckoEngine
-import com.evan.lazlo.core.SecretStore
+import androidx.lifecycle.lifecycleScope
 import com.evan.lazlo.core.Settings
-import com.evan.lazlo.proxy.CertificateAuthority
-import com.evan.lazlo.proxy.MitmVpnService
+import com.evan.lazlo.ui.LazloApp
+import com.evan.lazlo.ui.theme.LazloTheme
 import kotlinx.coroutines.launch
 
 /**
- * Single-Activity host wiring the three swappable pieces together:
- * a BrowserEngine tab, an AiProvider-backed chat sheet, and the
- * inspector toggle. This is scaffolding, not the finished UI — see
- * ARCHITECTURE.md's build-out order for what each screen still needs.
+ * Single-Activity host. All real UI lives under `ui/`, split by section
+ * (chat / browser / inspector) and tied together by [LazloApp]'s bottom
+ * navigation — this class only sets the Compose content and the theme.
+ * See ARCHITECTURE.md for the module map each section wires into.
+ *
+ * FLAG_SECURE — set synchronously before any content is attached, so
+ * the very first frame is already covered — blocks the standard OS
+ * screenshot/screen-record paths (including another app's
+ * MediaProjection capture), blanks the Recents/task-switcher thumbnail,
+ * and stops non-secure external displays or casts from mirroring this
+ * window. It does not and cannot stop a device already compromised by a
+ * malicious Accessibility Service reading the view hierarchy directly —
+ * no app-level flag can — but it closes every capture path a normal
+ * app has available to it.
+ *
+ * This is a real toggle (`Settings.screenshotProtectionFlow`, surfaced
+ * in the Inspector tab), not a hard lock: it starts on for safety, but
+ * a user doing security research who needs to screenshot or record
+ * their own findings can turn it off, and this collector applies that
+ * choice live — no restart needed either way.
  */
 class MainActivity : ComponentActivity() {
-
-    private val settings by lazy { Settings(applicationContext) }
-    private val secretStore by lazy { SecretStore(applicationContext) }
-    private val aiProviderFactory by lazy {
-        AiProviderFactory(applicationContext, settings, secretStore)
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { LazloRoot() }
-    }
-
-    @OptIn(ExperimentalMaterial3Api::class)
-    @Composable
-    private fun LazloRoot() {
-        val scope = rememberCoroutineScope()
-        var engineKind by remember { mutableStateOf(EngineKind.CHROMIUM) }
-        var inspectorEnabled by remember { mutableStateOf(false) }
-
-        MaterialTheme {
-            Scaffold(
-                topBar = { TopAppBar(title = { Text("Lazlo") }) },
-            ) { padding ->
-                Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(padding)
-                ) {
-                    Box(modifier = Modifier.weight(1f)) {
-                        AndroidView(factory = { ctx ->
-                            val container = android.widget.FrameLayout(ctx)
-                            val engine = when (engineKind) {
-                                EngineKind.CHROMIUM -> ChromiumEngine(ctx)
-                                EngineKind.GECKO -> GeckoEngine(ctx)
-                            }
-                            engine.attach(container)
-                            engine.loadUrl("about:blank")
-                            container
-                        })
-                    }
-
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(12.dp),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    ) {
-                        FilterChip(
-                            selected = engineKind == EngineKind.CHROMIUM,
-                            onClick = {
-                                engineKind = EngineKind.CHROMIUM
-                                scope.launch { settings.setBrowserEngine(EngineKind.CHROMIUM) }
-                            },
-                            label = { Text("WebView") },
-                        )
-                        FilterChip(
-                            selected = engineKind == EngineKind.GECKO,
-                            onClick = {
-                                engineKind = EngineKind.GECKO
-                                scope.launch { settings.setBrowserEngine(EngineKind.GECKO) }
-                            },
-                            label = { Text("GeckoView") },
-                        )
-                        Spacer(modifier = Modifier.weight(1f))
-                        Switch(
-                            checked = inspectorEnabled,
-                            onCheckedChange = { enabled ->
-                                inspectorEnabled = enabled
-                                scope.launch { settings.setInspectorEnabled(enabled) }
-                                if (enabled) startInspector() else stopInspector()
-                            },
-                        )
-                        Text("Inspector", modifier = Modifier.align(Alignment.CenterVertically))
-                    }
+        window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
+        lifecycleScope.launch {
+            Settings(applicationContext).screenshotProtectionFlow().collect { enabled ->
+                if (enabled) {
+                    window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
+                } else {
+                    window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
                 }
             }
         }
-    }
-
-    /** Prompts the OS VPN consent dialog; the service only ever loops back to localhost. */
-    private fun startInspector() {
-        CertificateAuthority(applicationContext).ensureCaExists()
-        val consent = android.net.VpnService.prepare(this)
-        if (consent != null) {
-            startActivityForResult(consent, REQUEST_VPN_CONSENT)
-        } else {
-            startService(Intent(this, MitmVpnService::class.java))
+        setContent {
+            LazloTheme {
+                LazloApp()
+            }
         }
-    }
-
-    private fun stopInspector() {
-        stopService(Intent(this, MitmVpnService::class.java))
-    }
-
-    @Deprecated("Deprecated in Java")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == REQUEST_VPN_CONSENT && resultCode == RESULT_OK) {
-            startService(Intent(this, MitmVpnService::class.java))
-        }
-    }
-
-    private companion object {
-        const val REQUEST_VPN_CONSENT = 100
     }
 }

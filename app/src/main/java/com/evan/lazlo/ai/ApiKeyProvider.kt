@@ -12,6 +12,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okio.BufferedSource
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.IOException
 
 /**
  * Generic bring-your-own-key streaming client. Config (base URL, model
@@ -63,6 +64,16 @@ class ApiKeyProvider(
 
             override fun onResponse(call: Call, response: Response) {
                 response.use {
+                    if (!it.isSuccessful) {
+                        // Otherwise a bad key, a rate limit, or a malformed
+                        // request would silently look like an empty reply
+                        // instead of surfacing as the error it is — the
+                        // body often has a JSON error payload, but even a
+                        // truncated read of it beats no message at all.
+                        val detail = runCatching { it.body?.string() }.getOrNull()?.take(500)
+                        close(IOException("HTTP ${it.code} ${it.message}".trim() + (detail?.let { d -> ": $d" } ?: "")))
+                        return
+                    }
                     val source: BufferedSource? = it.body?.source()
                     while (source != null && !source.exhausted()) {
                         val line = source.readUtf8Line() ?: break
@@ -106,6 +117,43 @@ class ApiKeyProvider(
             },
             parseSseDelta = { json ->
                 json.optJSONObject("delta")?.optString("text", null)
+            },
+        )
+
+        /**
+         * Ready-made config for OpenRouter's OpenAI-compatible
+         * `/v1/chat/completions` streaming endpoint — one BYOK key, but
+         * routes to whichever underlying model the user picks (defaults
+         * to GPT-4o). Bearer-token auth and an OpenAI-shaped SSE delta
+         * (`choices[0].delta.content`), unlike Anthropic's `delta.text`.
+         */
+        fun openRouterDefault(model: String = "openai/gpt-4o") = Config(
+            id = "openrouter",
+            displayName = "OpenRouter",
+            baseUrl = "https://openrouter.ai/api/v1/chat/completions",
+            model = model,
+            authHeader = { key -> "Authorization" to "Bearer $key" },
+            buildBody = { history, model ->
+                JSONObject().apply {
+                    put("model", model)
+                    put("stream", true)
+                    put("messages", JSONArray(history.map { m ->
+                        JSONObject().apply {
+                            put(
+                                "role",
+                                when (m.role) {
+                                    ChatMessage.Role.USER -> "user"
+                                    ChatMessage.Role.ASSISTANT -> "assistant"
+                                    ChatMessage.Role.SYSTEM -> "system"
+                                },
+                            )
+                            put("content", m.content)
+                        }
+                    }))
+                }
+            },
+            parseSseDelta = { json ->
+                json.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("delta")?.optString("content", null)
             },
         )
     }

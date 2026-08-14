@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="gecko_engine_title" translatable="false">GeckoView browser engine</string>
+</resources>

@@ -18,3 +18,10 @@ dependencyResolutionManagement {
 
 rootProject.name = "Lazlo"
 include(":app")
+include(":dynamic-features:gecko-engine")
+// Android dynamic-feature module names may only contain letters, digits,
+// and underscores (no hyphens) — the directory stays gecko-engine to
+// match ARCHITECTURE.md/dynamic-features/gecko-engine, but the Gradle
+// project's logical name, which AGP uses as the actual feature/split
+// name, has to be the underscore form.
+project(":dynamic-features:gecko-engine").name = "gecko_engine"

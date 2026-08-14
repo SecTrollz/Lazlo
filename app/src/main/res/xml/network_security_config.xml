@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  This is a power-user security/research tool (the traffic inspector is
+  explicitly in the same category as mitmproxy/Charles/HttpCanary/
+  PCAPdroid — see ARCHITECTURE.md), so this config stays close to the
+  platform default rather than locking things down further:
+
+  - cleartextTrafficPermitted="true": browsing to a plain http:// site
+    is a deliberate, common part of security research (a target that's
+    cleartext by design, observing what a cleartext request actually
+    looks like). Blocking it here wouldn't add any real protection —
+    the inspector already sees the traffic either way via the VPN
+    capture layer — it would only break the browser for exactly the
+    kind of page a researcher is most likely to want to load.
+  - <certificates src="user"/> alongside "system": lets Lazlo's own
+    traffic (its browsing, its own BYOK calls) trust a CA the user
+    installed themselves — including Lazlo's own inspector CA, once
+    installed, so the inspector can show Lazlo's own outbound requests
+    too, not just every other app's — and lets Lazlo be chained
+    underneath another MITM tool (Burp, mitmproxy, PCAPdrove) the user
+    is already running, the same way any of those tools' own companion
+    browsers work. A user has to explicitly install a CA into their own
+    trust store for this to matter at all; nothing here trusts a CA
+    Lazlo didn't put there itself or the user didn't choose to add.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
