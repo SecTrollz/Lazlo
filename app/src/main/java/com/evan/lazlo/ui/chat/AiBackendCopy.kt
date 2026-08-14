@@ -17,7 +17,7 @@ object AiBackendCopy {
         API_KEY_PROVIDER_ID ->
             "Uses your own API key. Your messages go straight to the provider you choose over the network — nothing routes through Lazlo's own servers, because there isn't one."
         AICORE_PROVIDER_ID ->
-            "Runs fully offline on this device, using Android's built-in Gemini Nano model. Nothing you type ever leaves your phone."
+            "Runs fully offline on this device, using Android's built-in Gemini Nano model. Nothing you type ever leaves your phone. On the very first use, the device may need a minute to finish provisioning the model — that happens automatically, no action needed."
         MEDIAPIPE_PROVIDER_ID ->
             "Runs fully offline using a model file you supply. Nothing you type ever leaves your phone."
         else -> "A chat backend."

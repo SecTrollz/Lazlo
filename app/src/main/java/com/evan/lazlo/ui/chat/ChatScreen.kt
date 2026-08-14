@@ -304,10 +304,22 @@ private fun BackendPickerDialog(
                             .padding(vertical = 6.dp),
                     ) {
                         Row(verticalAlignment = Alignment.Top) {
+                            // Deliberately not gated on row.isReady: that
+                            // flag reflects a point-in-time check (e.g. an
+                            // on-device model still provisioning on first
+                            // use), and nothing re-runs it while this
+                            // dialog is open. Gating selection on it would
+                            // mean a backend that becomes ready a few
+                            // seconds later stays permanently disabled
+                            // until some unrelated action happens to
+                            // refresh it. Picking a not-yet-ready backend
+                            // is safe either way — sending a message
+                            // triggers its own readiness/preparation and
+                            // surfaces a clear error if it genuinely can't
+                            // proceed (e.g. no API key saved yet).
                             RadioButton(
                                 selected = row.id == state.activeProviderId,
-                                onClick = { if (row.isReady) onSelect(row.id) },
-                                enabled = row.isReady,
+                                onClick = { onSelect(row.id) },
                             )
                             Column(modifier = Modifier.padding(start = 4.dp).weight(1f)) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
