@@ -58,6 +58,20 @@ class ApiKeyProviderConfigTest {
     }
 
     @Test
+    fun `anthropic config sends the required anthropic-version header`() {
+        // /v1/messages rejects any request without it, so this isn't cosmetic:
+        // omitting it makes every call on this backend fail before the model
+        // ever sees the prompt.
+        val config = ApiKeyProvider.anthropicDefault()
+        assertEquals("2023-06-01", config.extraHeaders["anthropic-version"])
+    }
+
+    @Test
+    fun `openRouter needs no extra headers beyond its bearer token`() {
+        assertEquals(emptyMap<String, String>(), ApiKeyProvider.openRouterDefault().extraHeaders)
+    }
+
+    @Test
     fun `anthropic and openRouter configs use different ids so keys never collide`() {
         assertEquals("anthropic", ApiKeyProvider.anthropicDefault().id)
         assertEquals("openrouter", ApiKeyProvider.openRouterDefault().id)

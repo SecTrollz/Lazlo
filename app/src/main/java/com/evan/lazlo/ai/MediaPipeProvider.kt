@@ -3,9 +3,13 @@ package com.evan.lazlo.ai
 import android.content.Context
 import com.google.mediapipe.tasks.genai.llminference.LlmInference
 import com.google.mediapipe.tasks.genai.llminference.LlmInference.LlmInferenceOptions
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.flowOn
 import java.io.File
 
 /**
@@ -56,6 +60,14 @@ class MediaPipeProvider(
         e.generateResponseAsync(prompt)
         awaitClose { activeListener = null }
     }
+        // Same dropped-token hazard as ApiKeyProvider: the result listener
+        // fires on MediaPipe's own thread and can only trySend.
+        .buffer(Channel.UNLIMITED)
+        // ChatViewModel collects on viewModelScope — i.e. the main thread. The
+        // isReady() call above loads a multi-gigabyte model file off disk
+        // through LlmInference.createFromOptions the first time it runs, which
+        // on the main thread is a guaranteed ANR rather than a slow first token.
+        .flowOn(Dispatchers.IO)
 
     /** Frees the native inference engine backing [engine]; safe to call even if a model was never loaded. */
     override fun close() {
