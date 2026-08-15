@@ -71,7 +71,19 @@ class ChromiumEngine(private val context: Context) : BrowserEngine {
     }
 
     override fun destroy() {
-        webView?.destroy()
+        webView?.let { wv ->
+            // WebView.destroy() is documented as "call after this WebView has
+            // been removed from the view system" — destroying one that's still
+            // attached leaks the view/window and can crash inside Chromium.
+            // Compose's onRelease fires while the container still holds it, so
+            // detach first. Also stop loading and clear the delegates so an
+            // in-flight page can't call back into a ViewModel that's going away.
+            wv.stopLoading()
+            wv.webChromeClient = null
+            wv.setDownloadListener(null)
+            (wv.parent as? ViewGroup)?.removeView(wv)
+            wv.destroy()
+        }
         webView = null
     }
 }
