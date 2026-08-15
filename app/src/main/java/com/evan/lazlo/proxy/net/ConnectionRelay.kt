@@ -15,6 +15,7 @@ import io.netty.channel.local.LocalAddress
 import io.netty.channel.local.LocalChannel
 import io.netty.channel.local.LocalServerChannel
 import io.netty.channel.nio.NioEventLoopGroup
+import io.netty.channel.socket.DuplexChannel
 import io.netty.channel.socket.nio.NioSocketChannel
 import io.netty.handler.ssl.SniHandler
 import io.netty.handler.ssl.SslContext
@@ -26,6 +27,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import java.io.IOException
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
@@ -33,6 +35,7 @@ import java.nio.channels.SocketChannel
 import java.security.cert.X509Certificate
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import io.netty.channel.Channel as NettyChannel
 
 /**
@@ -120,9 +123,14 @@ internal class ConnectionRelay(private val eventLoopGroup: NioEventLoopGroup) {
         val fallbackHost = destinationAddress.joinToString(".") { (it.toInt() and 0xFF).toString() }
         val requestSniffer = HttpLineSniffer()
         val responseSniffer = HttpLineSniffer()
-        var bytesTotal = 0L
+        // Written from a Netty event-loop thread (the decrypted-request
+        // handler) and from this flow's own coroutines, then read once more
+        // when the exchange is logged — three different threads, so plain
+        // captured `var`s would race and under-count (or publish nothing at
+        // all) rather than just being slightly off.
+        val bytesTotal = AtomicLong(0)
         var loggedHost = fallbackHost
-        var firstRequestBytes: ByteArray? = null
+        val firstRequestBytes = AtomicReference<ByteArray?>(null)
 
         val localAddress = LocalAddress("lazlo-mitm-${localFlowIds.incrementAndGet()}")
         val sniResolved = CompletableDeferred<String>()
@@ -134,7 +142,7 @@ internal class ConnectionRelay(private val eventLoopGroup: NioEventLoopGroup) {
         // then SslHandler does the actual TLS handshake/record framing.
         // Whatever reaches the end of this pipeline is decrypted
         // application data.
-        ServerBootstrap()
+        val bindFuture = ServerBootstrap()
             .group(eventLoopGroup)
             .channel(LocalServerChannel::class.java)
             .childHandler(object : ChannelInitializer<NettyChannel>() {
@@ -155,8 +163,8 @@ internal class ConnectionRelay(private val eventLoopGroup: NioEventLoopGroup) {
                                 msg.readBytes(bytes)
                                 msg.release()
                                 requestSniffer.feed(bytes, bytes.size)
-                                if (firstRequestBytes == null) firstRequestBytes = bytes
-                                bytesTotal += bytes.size
+                                firstRequestBytes.compareAndSet(null, bytes)
+                                bytesTotal.addAndGet(bytes.size.toLong())
                                 decryptedFromClient.trySend(bytes)
                             } else {
                                 ReferenceCountUtil.release(msg)
@@ -165,9 +173,17 @@ internal class ConnectionRelay(private val eventLoopGroup: NioEventLoopGroup) {
 
                         override fun channelInactive(ctx: ChannelHandlerContext) {
                             decryptedFromClient.close()
+                            // A TLS session that ends before SniHandler ever
+                            // parsed a ClientHello (an aborted handshake, a
+                            // client that connects and says nothing) would
+                            // otherwise leave the sniResolved.await() below
+                            // suspended forever, holding the whole flow — and
+                            // its upstream socket and coroutines — open.
+                            sniResolved.completeExceptionally(IOException("TLS session ended before SNI was resolved"))
                         }
 
                         override fun exceptionCaught(ctx: ChannelHandlerContext, cause: Throwable) {
+                            sniResolved.completeExceptionally(cause)
                             decryptedFromClient.close(cause as? Exception ?: RuntimeException(cause))
                             ctx.close()
                         }
@@ -176,7 +192,12 @@ internal class ConnectionRelay(private val eventLoopGroup: NioEventLoopGroup) {
                 }
             })
             .bind(localAddress)
-            .awaitCompletion()
+        bindFuture.awaitCompletion()
+        // Bound LocalServerChannels stay registered in Netty's process-wide
+        // LocalChannelRegistry until closed. One per TLS flow, never closed,
+        // is an unbounded leak for as long as the inspector runs — hence the
+        // explicit close in the finally below.
+        val serverChannel = bindFuture.channel()
 
         // Client side of that same pair: bytes written here are exactly
         // what the app's real TLS client would send "over the wire" (its
@@ -213,14 +234,32 @@ internal class ConnectionRelay(private val eventLoopGroup: NioEventLoopGroup) {
                 }
             })
             .connect(localAddress)
-        bridgeConnect.awaitCompletion()
-        val bridgeChannel = bridgeConnect.channel()
-        val acceptedChannel = acceptedChannelDeferred.await()
+        val bridgeChannel: NettyChannel
+        val acceptedChannel: NettyChannel
+        try {
+            bridgeConnect.awaitCompletion()
+            bridgeChannel = bridgeConnect.channel()
+            acceptedChannel = acceptedChannelDeferred.await()
+        } catch (t: Throwable) {
+            // The main try/finally below hasn't started yet, so nothing else
+            // would ever close the channel bound just above if the local pair
+            // fails to connect.
+            runCatching { bridgeConnect.channel()?.close() }
+            runCatching { serverChannel.close() }
+            throw t
+        }
 
         var upstream: NettyChannel? = null
         try {
             val appToBridge = launch(Dispatchers.Default) {
-                for (chunk in flow.fromClient) bridgeChannel.writeAndFlush(Unpooled.wrappedBuffer(chunk))
+                try {
+                    for (chunk in flow.fromClient) bridgeChannel.writeAndFlush(Unpooled.wrappedBuffer(chunk))
+                } finally {
+                    // Same hazard as channelInactive above, from the other
+                    // side: if the app closed the flow before its ClientHello
+                    // ever got through, nothing else would ever complete this.
+                    sniResolved.completeExceptionally(IOException("client closed before TLS SNI was resolved"))
+                }
             }
             val bridgeToApp = launch(Dispatchers.Default) {
                 for (bytes in encryptedToClient) sendToClient(bytes)
@@ -245,7 +284,7 @@ internal class ConnectionRelay(private val eventLoopGroup: NioEventLoopGroup) {
             val upstreamToClient = launch(Dispatchers.Default) {
                 for (bytes in upstreamResponses) {
                     responseSniffer.feed(bytes, bytes.size)
-                    bytesTotal += bytes.size
+                    bytesTotal.addAndGet(bytes.size.toLong())
                     val rewritten = RewriteEngine.rewriteResponse(bytes, resolvedHost, rules)
                     // Writing plaintext out through the accepted (server)
                     // channel re-encrypts it via its SslHandler; the
@@ -255,21 +294,58 @@ internal class ConnectionRelay(private val eventLoopGroup: NioEventLoopGroup) {
                 }
             }
 
-            appToBridge.join()
-            bridgeToApp.join()
+            // The flow is over as soon as *either* end is done: the app
+            // half-closing (its FIN closes flow.fromClient, ending appToBridge)
+            // or the upstream closing (ending upstreamToClient). Joining all
+            // four unconditionally deadlocks instead: clientToUpstream only
+            // ends when decryptedFromClient closes, which only happens when the
+            // accepted channel goes inactive — and nothing in a completed
+            // exchange closes it. That left every HTTPS flow parked here
+            // forever, so finishFlow() never ran: no FIN to the client, and the
+            // flow's coroutines, channels and upstream socket leaked for the
+            // lifetime of the VPN session.
+            val flowEnded = CompletableDeferred<Unit>()
+            appToBridge.invokeOnCompletion { flowEnded.complete(Unit) }
+            upstreamToClient.invokeOnCompletion { flowEnded.complete(Unit) }
+            flowEnded.await()
+
+            // Closing the accepted (TLS server) side is what unblocks the rest:
+            // it flushes whatever was already written toward the app, then
+            // tears down the local pair, closing both decryptedFromClient
+            // (ends clientToUpstream) and encryptedToClient (ends bridgeToApp).
+            runCatching { acceptedChannel.close().awaitCompletion() }
             clientToUpstream.join()
+            bridgeToApp.join()
+            // The app may simply never send its FIN (an idle keep-alive
+            // connection), so this one has to be cancelled rather than awaited.
+            appToBridge.cancel()
+            appToBridge.join()
+            runCatching { connectedUpstream.close().awaitCompletion() }
             upstreamToClient.join()
         } finally {
             runCatching { upstream?.close() }
             runCatching { bridgeChannel.close() }
             runCatching { acceptedChannel.close() }
-            logExchange(onHttpExchange, "https", loggedHost, requestSniffer.requestLine, responseSniffer.statusCode, bytesTotal, firstRequestBytes)
+            runCatching { serverChannel.close() }
+            logExchange(
+                onHttpExchange,
+                "https",
+                loggedHost,
+                requestSniffer.requestLine,
+                responseSniffer.statusCode,
+                bytesTotal.get(),
+                firstRequestBytes.get(),
+            )
         }
     }
 
+    // computeIfAbsent rather than getOrPut for the same reason as
+    // LeafCertificateFactory.leafFor: parallel connections to a new host would
+    // otherwise each build their own SslContext (and mint their own leaf) for
+    // it, on the handshake's critical path.
     private fun sslContextForHost(host: String, leafCertificateFactory: LeafCertificateFactory, caCertificate: X509Certificate): SslContext =
-        sslContextCache.getOrPut(host) {
-            val leaf = leafCertificateFactory.leafFor(host)
+        sslContextCache.computeIfAbsent(host) {
+            val leaf = leafCertificateFactory.leafFor(it)
             SslContextBuilder.forServer(leaf.privateKey, leaf.certificate, caCertificate).build()
         }
 
@@ -287,8 +363,10 @@ internal class ConnectionRelay(private val eventLoopGroup: NioEventLoopGroup) {
         val host = destinationAddress.joinToString(".") { (it.toInt() and 0xFF).toString() }
         val requestSniffer = HttpLineSniffer()
         val responseSniffer = HttpLineSniffer()
-        var bytesTotal = 0L
-        var firstRequestBytes: ByteArray? = null
+        // Both directions run on their own coroutine, so these counters are
+        // genuinely shared mutable state — see relayTls for the same note.
+        val bytesTotal = AtomicLong(0)
+        val firstRequestBytes = AtomicReference<ByteArray?>(null)
 
         val fromUpstream = Channel<ByteArray>(Channel.UNLIMITED)
         val upstream = connectUpstream(destinationAddress, destinationPort, protectSocket, null, null, fromUpstream)
@@ -296,8 +374,8 @@ internal class ConnectionRelay(private val eventLoopGroup: NioEventLoopGroup) {
             val toUpstream = launch(Dispatchers.Default) {
                 for (chunk in flow.fromClient) {
                     requestSniffer.feed(chunk, chunk.size)
-                    if (firstRequestBytes == null) firstRequestBytes = chunk
-                    bytesTotal += chunk.size
+                    firstRequestBytes.compareAndSet(null, chunk)
+                    bytesTotal.addAndGet(chunk.size.toLong())
                     val rewritten = RewriteEngine.rewriteRequest(chunk, host, rules)
                     upstream.writeAndFlush(Unpooled.wrappedBuffer(rewritten))
                 }
@@ -305,17 +383,41 @@ internal class ConnectionRelay(private val eventLoopGroup: NioEventLoopGroup) {
             val toClient = launch(Dispatchers.Default) {
                 for (bytes in fromUpstream) {
                     responseSniffer.feed(bytes, bytes.size)
-                    bytesTotal += bytes.size
+                    bytesTotal.addAndGet(bytes.size.toLong())
                     val rewritten = RewriteEngine.rewriteResponse(bytes, host, rules)
                     sendToClient(rewritten)
                 }
             }
-            toUpstream.join()
+            toUpstream.invokeOnCompletion { halfCloseUpstream(upstream) }
             toClient.join()
+            // The app may never send a FIN of its own (keep-alive), so once the
+            // upstream is done this direction is cancelled rather than awaited.
+            toUpstream.cancel()
+            toUpstream.join()
         } finally {
             runCatching { upstream.close() }
-            logExchange(onHttpExchange, "http", host, requestSniffer.requestLine, responseSniffer.statusCode, bytesTotal, firstRequestBytes)
+            logExchange(
+                onHttpExchange,
+                "http",
+                host,
+                requestSniffer.requestLine,
+                responseSniffer.statusCode,
+                bytesTotal.get(),
+                firstRequestBytes.get(),
+            )
         }
+    }
+
+    /**
+     * Propagates the app's half-close to the upstream connection instead of
+     * just stopping: a server still waiting on the end of the request needs
+     * that EOF before it will answer and close — and *its* close is what ends
+     * the response-side loop. Closing outright instead would truncate an
+     * in-flight response; doing nothing (the previous behavior) left a flow
+     * whose client had FIN'd against a keep-alive server relaying forever.
+     */
+    private fun halfCloseUpstream(upstream: NettyChannel) {
+        runCatching { (upstream as? DuplexChannel)?.shutdownOutput() }
     }
 
     // ---- anything else — raw passthrough, not inspected ----
@@ -336,8 +438,10 @@ internal class ConnectionRelay(private val eventLoopGroup: NioEventLoopGroup) {
             val toClient = launch(Dispatchers.Default) {
                 for (bytes in fromUpstream) sendToClient(bytes)
             }
-            toUpstream.join()
+            toUpstream.invokeOnCompletion { halfCloseUpstream(upstream) }
             toClient.join()
+            toUpstream.cancel()
+            toUpstream.join()
         } finally {
             runCatching { upstream.close() }
         }

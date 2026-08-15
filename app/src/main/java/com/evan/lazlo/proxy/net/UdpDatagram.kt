@@ -4,10 +4,12 @@ import com.evan.lazlo.proxy.net.IpV4Packet.Companion.u16
 import com.evan.lazlo.proxy.net.IpV4Packet.Companion.writeU16
 
 /**
- * Minimal UDP datagram parser/builder (RFC 768). Used only for
- * passthrough (mainly DNS, see [TcpIpStack]) — datagrams aren't
- * inspected or logged, just forwarded so the rest of the device's
- * traffic keeps working while the inspector is on.
+ * Minimal UDP datagram parser/builder (RFC 768). Used for relaying UDP
+ * (mainly DNS, see [TcpIpStack.handleUdp]) so the rest of the device's
+ * traffic keeps working while the inspector is on. Payloads aren't
+ * rewritten, but every relayed datagram *is* logged to the traffic list —
+ * best-effort decoded as a DNS question name on port 53 (see
+ * [DnsMessage]), a bare `host:port` label otherwise.
  */
 class UdpDatagram(
     val sourcePort: Int,

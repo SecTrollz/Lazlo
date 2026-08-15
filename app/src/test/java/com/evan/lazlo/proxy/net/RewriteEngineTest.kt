@@ -1,5 +1,6 @@
 package com.evan.lazlo.proxy.net
 
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -97,6 +98,47 @@ class RewriteEngineTest {
         val declaredLength = Regex("""content-length: (\d+)""", RegexOption.IGNORE_CASE).find(text)!!.groupValues[1].toInt()
         val actualBodyBytes = text.substringAfter("\r\n\r\n").toByteArray().size
         assertEquals(declaredLength, actualBodyBytes)
+    }
+
+    @Test
+    fun `two pipelined requests in one chunk pass through untouched instead of losing the second`() {
+        // A single TCP read can carry more than one complete message. Rewriting
+        // only the first and re-encoding would silently drop the second — the
+        // engine has to fail open here rather than truncate the stream.
+        val first = rawRequest(headers = "X-Which: first\r\n")
+        val second = rawRequest(headers = "X-Which: second\r\n")
+        val chunk = first + second
+        val result = RewriteEngine.rewriteRequest(
+            chunk,
+            "example.com",
+            listOf(rule(host = "example.com", setHeaderName = "X-Injected", setHeaderValue = "yes")),
+        )
+        assertArrayEquals(chunk, result)
+    }
+
+    @Test
+    fun `a complete request followed by a partial one passes through untouched`() {
+        // Same hazard from the other direction: the trailing bytes belong to a
+        // message the decoder can't complete yet. Re-encoding just the first
+        // message would drop them.
+        val chunk = rawRequest() + "POST /next HTTP/1.1\r\nHost: exa".toByteArray()
+        val result = RewriteEngine.rewriteRequest(
+            chunk,
+            "example.com",
+            listOf(rule(host = "example.com", setHeaderName = "X-Injected", setHeaderValue = "yes")),
+        )
+        assertArrayEquals(chunk, result)
+    }
+
+    @Test
+    fun `two responses in one chunk pass through untouched`() {
+        val chunk = rawResponse("""{"n":1}""") + rawResponse("""{"n":2}""")
+        val result = RewriteEngine.rewriteResponse(
+            chunk,
+            "example.com",
+            listOf(rule(host = "example.com", request = false, response = true, bodyFind = "1", bodyReplace = "9")),
+        )
+        assertArrayEquals(chunk, result)
     }
 
     @Test

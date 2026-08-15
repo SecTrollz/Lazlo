@@ -41,8 +41,19 @@ class LeafCertificateFactory(
 
     private val cache = ConcurrentHashMap<String, Leaf>()
 
-    /** Returns a cached leaf for [host] if one exists, else generates, signs, and caches a new one. */
-    fun leafFor(host: String): Leaf = cache.getOrPut(host) { generateLeaf(host) }
+    /**
+     * Returns a cached leaf for [host] if one exists, else generates, signs,
+     * and caches a new one.
+     *
+     * `computeIfAbsent`, not Kotlin's `getOrPut`: the latter is get-then-put
+     * with a gap in between, so concurrent first hits on the same host each
+     * run the full generate-and-sign. That's exactly the shape of real
+     * traffic — a browser opens several connections to a new host at once —
+     * and the work is a 2048-bit RSA keygen plus a signature, on the TLS
+     * handshake's critical path. `computeIfAbsent` makes the rest wait for
+     * the first one instead of duplicating it.
+     */
+    fun leafFor(host: String): Leaf = cache.computeIfAbsent(host) { generateLeaf(it) }
 
     private fun generateLeaf(host: String): Leaf {
         val keyPair = generateLeafKeyPair()

@@ -52,10 +52,8 @@ internal object RewriteEngine {
         return runCatching {
             val channel = EmbeddedChannel(HttpRequestDecoder(), HttpObjectAggregator(MAX_AGGREGATED_BYTES))
             try {
-                if (!channel.writeInbound(Unpooled.wrappedBuffer(bytes))) return bytes
-                val request = channel.readInbound<FullHttpRequest>() ?: return bytes
+                val request = decodeExactlyOne<FullHttpRequest>(channel, bytes) ?: return bytes
                 try {
-                    if (!request.decoderResult().isSuccess) return bytes
                     applicable.forEach { rule -> applyToRequest(request, rule) }
                     encode(HttpRequestEncoder(), request)
                 } finally {
@@ -73,10 +71,8 @@ internal object RewriteEngine {
         return runCatching {
             val channel = EmbeddedChannel(HttpResponseDecoder(), HttpObjectAggregator(MAX_AGGREGATED_BYTES))
             try {
-                if (!channel.writeInbound(Unpooled.wrappedBuffer(bytes))) return bytes
-                val response = channel.readInbound<FullHttpResponse>() ?: return bytes
+                val response = decodeExactlyOne<FullHttpResponse>(channel, bytes) ?: return bytes
                 try {
-                    if (!response.decoderResult().isSuccess) return bytes
                     applicable.forEach { rule -> applyToResponse(response, rule) }
                     encode(HttpResponseEncoder(), response)
                 } finally {
@@ -121,6 +117,46 @@ internal object RewriteEngine {
             null
         } finally {
             channel.finishAndReleaseAll()
+        }
+    }
+
+    /**
+     * Decodes [bytes] into exactly one complete, well-formed HTTP message, or
+     * returns null (caller passes the original bytes through untouched).
+     *
+     * "Exactly one" is the load-bearing part, and it's why this can't just be
+     * `writeInbound` + `readInbound`: a single TCP read can carry a complete
+     * message *plus* more — a second pipelined/keep-alive message, or the
+     * leading bytes of one. Re-encoding only the first decoded message would
+     * silently drop everything after it, corrupting the stream far worse than
+     * skipping the rewrite would. So this checks both ends of that: the input
+     * buffer must be fully consumed (no trailing partial message left in the
+     * decoder's cumulation) *and* no second message may be sitting in the
+     * inbound queue. Anything else fails open, per this object's contract.
+     *
+     * The retain/release around [input] is what makes the first check
+     * observable: `writeInbound` hands ownership of the buffer to the decoder,
+     * which releases it once it has consumed every byte — the extra reference
+     * keeps it alive long enough to read its remaining readable bytes either way.
+     */
+    private fun <T : io.netty.handler.codec.http.FullHttpMessage> decodeExactlyOne(
+        channel: EmbeddedChannel,
+        bytes: ByteArray,
+    ): T? {
+        val input = Unpooled.wrappedBuffer(bytes).retain()
+        try {
+            if (!channel.writeInbound(input)) return null
+            val message = channel.readInbound<T>() ?: return null
+            val usable = message.decoderResult().isSuccess &&
+                !input.isReadable &&
+                channel.inboundMessages().isEmpty()
+            if (!usable) {
+                message.release()
+                return null
+            }
+            return message
+        } finally {
+            input.release()
         }
     }
 
