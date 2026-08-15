@@ -42,6 +42,17 @@ class ApiKeyProviderConfigTest {
     }
 
     @Test
+    fun `openRouter request body caps max_tokens so a low-credit account can't be rejected before generating anything`() {
+        // Confirmed against the real API: omitting this entirely, OpenRouter
+        // defaults to the model's max output (16384 for gpt-4o) and returns
+        // a 402 credit-limit error before a single token streams back, on
+        // any account that can't cover that many tokens.
+        val config = ApiKeyProvider.openRouterDefault()
+        val body = config.buildBody(history, config.model)
+        assertEquals(1024, body.getInt("max_tokens"))
+    }
+
+    @Test
     fun `openRouter parses an OpenAI-shaped streaming delta`() {
         val config = ApiKeyProvider.openRouterDefault()
         val chunk = JSONObject(

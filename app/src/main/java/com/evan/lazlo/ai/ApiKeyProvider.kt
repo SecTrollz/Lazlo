@@ -157,6 +157,13 @@ class ApiKeyProvider(
                 JSONObject().apply {
                     put("model", model)
                     put("stream", true)
+                    // Without this, OpenRouter defaults to the model's max
+                    // output (16384 for gpt-4o) — confirmed against the real
+                    // API: that default alone triggers a 402 credit-limit
+                    // error on any account that can't cover 16384 tokens,
+                    // before a single token of the reply is generated.
+                    // Matches Anthropic's config, which already caps this.
+                    put("max_tokens", 1024)
                     put("messages", JSONArray(history.map { m ->
                         JSONObject().apply {
                             put(
