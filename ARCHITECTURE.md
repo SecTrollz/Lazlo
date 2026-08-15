@@ -235,6 +235,15 @@ Standard on-device MITM pattern, same one ProxyPin/HttpCanary/PCAPdroid use:
    validates the interception mechanism itself; it doesn't (and can't,
    on the JVM) exercise the VPN/TUN plumbing that feeds real device
    traffic into it — see the scope note below.
+   `ConnectionRelayTerminationTest` covers the other half of what *is*
+   checkable off-device: that a relayed flow actually **finishes**. It
+   drives a real `ConnectionRelay.relay()` against a loopback server
+   whose client never sends a FIN (an app holding a keep-alive
+   connection), and asserts the relay returns once the upstream closes.
+   An earlier version joined every direction unconditionally and so
+   never returned in that case — which meant `TcpIpStack.finishFlow()`
+   never ran: no FIN back to the app, and the flow's coroutines,
+   channels and upstream socket held for the rest of the session.
 4. **MitmVpnService** — the local-loopback `VpnService` that owns the TUN
    interface and drives `TcpIpStack`'s `pump()`/`shutdown()` across its
    lifecycle. TLS is terminated locally only — nothing is forwarded to
@@ -246,11 +255,17 @@ Standard on-device MITM pattern, same one ProxyPin/HttpCanary/PCAPdroid use:
    service exposed to normal background-service limits despite looking
    like a foreground service on paper), and because a self-interception
    privacy tool should never run invisibly.
-5. **Traffic log** — in-memory ring buffer (optionally persisted to an
-   encrypted local Room DB, off by default) of method/host/path/status/
-   size, viewable in the Inspector tab (`ui/inspector/InspectorScreen.kt`).
-   No export path unless the user
-   explicitly taps "export" (writes a local file, no network send).
+5. **Traffic log** — an in-memory ring buffer (`TrafficLog`, 500 entries)
+   of method/host/path/status/size, viewable in the Inspector tab
+   (`ui/inspector/InspectorScreen.kt`). Deliberately **memory-only**:
+   nothing captured is written to disk at all, so there's no persisted
+   store to protect and nothing survives the process. There is no export
+   path and no on-disk persistence option — earlier revisions of this
+   file described an optional encrypted Room DB and an "export" action;
+   neither exists in the code, and the honest version is that captured
+   traffic simply never leaves memory. Adding either would mean adding a
+   place where decrypted traffic lives on disk, which is a deliberate
+   design decision to make on purpose, not to inherit from a doc.
 6. **Active control: rewrite rules + replay** — the inspector isn't
    read-only. `RewriteEngine` (`proxy/net/RewriteEngine.kt`) decodes
    every request/response chunk that passes through `ConnectionRelay`
@@ -518,10 +533,11 @@ one-line Compose host, not where the app's logic lives. `gradle
 31) and now also builds `:dynamic-features:gecko_engine` as a genuinely
 separate on-demand module (confirmed by inspecting the resulting base
 APK's contents, not just by the build succeeding). `gradle
-:app:testDebugUnitTest` runs and passes 85 JVM-level unit tests under
+:app:testDebugUnitTest` runs and passes 95 JVM-level unit tests under
 `app/src/test/`: the IPv4/TCP codec, the CA/leaf certificate-signing
 logic, a real end-to-end TLS handshake against the Netty MITM pipeline
-(`NettyTlsTerminationTest`), the DNS question-name decoder
+(`NettyTlsTerminationTest`), relay teardown against a real loopback
+upstream (`ConnectionRelayTerminationTest`), the DNS question-name decoder
 (`DnsMessageTest`), the rewrite-rules engine against real HTTP byte
 layouts (`RewriteEngineTest`) and its rule persistence codec
 (`RewriteRuleCodecTest`), AICore's error-code-to-plain-language

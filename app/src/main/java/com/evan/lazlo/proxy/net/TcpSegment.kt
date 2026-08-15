@@ -36,6 +36,33 @@ class TcpSegment(
         const val PSH = 0x08
         const val ACK = 0x10
 
+        /** Mask for the 32-bit sequence-number space these helpers wrap within. */
+        const val SEQUENCE_MASK = 0xFFFFFFFFL
+
+        /**
+         * Advances a sequence number by [advanceBy] bytes, wrapping within TCP's
+         * 32-bit sequence space (RFC 793 §3.3) rather than counting off the end
+         * of it.
+         *
+         * This matters because [TcpIpStack] compares its tracked sequence
+         * numbers against ones parsed straight off the wire, which are always
+         * 0..2^32-1. A counter that just kept incrementing would silently stop
+         * matching the moment a flow's sequence numbers wrapped — which happens
+         * after 4GB on the flow, but also *immediately* for a flow whose
+         * randomly-chosen initial sequence number started near the top of the
+         * space.
+         */
+        fun nextSequence(sequenceNumber: Long, advanceBy: Long): Long = (sequenceNumber + advanceBy) and SEQUENCE_MASK
+
+        /**
+         * Serial-number comparison (RFC 1982): true when [a] sits *before* [b]
+         * in TCP's wrapping sequence space. A plain `a < b` is wrong across a
+         * wrap — 0xFFFFFFFF is "before" 0x00000001, not after it — which is
+         * what distinguishes an already-acked retransmission from a genuinely
+         * out-of-order future segment.
+         */
+        fun isBeforeSequence(a: Long, b: Long): Boolean = ((a - b) and SEQUENCE_MASK).toInt() < 0
+
         fun parse(buffer: ByteArray): TcpSegment? {
             if (buffer.size < 20) return null
             val sourcePort = u16(buffer, 0)

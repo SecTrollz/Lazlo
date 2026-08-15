@@ -7,6 +7,7 @@ import com.evan.lazlo.proxy.net.TcpIpStack
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import java.net.DatagramSocket
 import java.net.Socket
 import java.security.PrivateKey
@@ -24,14 +25,21 @@ data class TrafficEntry(
     val replay: ReplayableRequest? = null,
 )
 
-/** Simple in-memory ring buffer; nothing here is written to disk unless the user exports it. */
+/** Simple in-memory ring buffer, capped at [MAX] entries — captured traffic is never written to disk, and there's no export path. */
 object TrafficLog {
     private const val MAX = 500
     private val _entries = MutableStateFlow<List<TrafficEntry>>(emptyList())
     val entries = _entries.asStateFlow()
 
+    /**
+     * Entries arrive from every relay coroutine and from the packet pump at
+     * once, so this has to be an atomic read-modify-write ([MutableStateFlow.update]
+     * retries on conflict) rather than `value = value + entry` — concurrent
+     * exchanges would otherwise silently overwrite each other's appends, and
+     * the inspector would quietly under-report exactly when traffic is busiest.
+     */
     fun append(entry: TrafficEntry) {
-        _entries.value = (_entries.value + entry).takeLast(MAX)
+        _entries.update { current -> (current + entry).takeLast(MAX) }
     }
 
     fun clear() { _entries.value = emptyList() }

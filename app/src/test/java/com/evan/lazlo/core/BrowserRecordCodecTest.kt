@@ -40,4 +40,23 @@ class BrowserRecordCodecTest {
         val decoded = BrowserRecordCodec.decodeDownloads(BrowserRecordCodec.encodeDownloads(downloads))
         assertEquals(downloads, decoded)
     }
+
+    @Test
+    fun `download entries missing their id are skipped, so they cannot collide as list keys`() {
+        // The downloads list is keyed by downloadManagerId; two id-less entries
+        // would both decode to -1 and crash the LazyColumn on the duplicate key.
+        val json = """[{"url":"https://a.test/1","fileName":"a"},{"url":"https://b.test/2","fileName":"b"},""" +
+            """{"id":7,"url":"https://ok.test/f.pdf","fileName":"f.pdf","ts":9}]"""
+        val decoded = BrowserRecordCodec.decodeDownloads(json)
+        assertEquals(1, decoded.size)
+        assertEquals(7L, decoded[0].downloadManagerId)
+        assertEquals(decoded.map { it.downloadManagerId }.distinct().size, decoded.size)
+    }
+
+    @Test
+    fun `decoding blank or malformed download input yields an empty list, not a crash`() {
+        assertTrue(BrowserRecordCodec.decodeDownloads(null).isEmpty())
+        assertTrue(BrowserRecordCodec.decodeDownloads("").isEmpty())
+        assertTrue(BrowserRecordCodec.decodeDownloads("{not json").isEmpty())
+    }
 }

@@ -63,6 +63,13 @@ object BrowserRecordCodec {
         return buildList {
             for (i in 0 until array.length()) {
                 val obj = array.optJSONObject(i) ?: continue
+                // Skip entries with no DownloadManager id, the same way
+                // decodeRecords skips entries with no url. Beyond being junk,
+                // these are actively dangerous downstream: the downloads list
+                // keys its rows by this id, and two id-less entries would
+                // collide on the same key and crash the list rather than just
+                // rendering oddly.
+                if (!obj.has("id") || obj.isNull("id")) continue
                 add(
                     DownloadRecord(
                         downloadManagerId = obj.optLong("id", -1L),

@@ -2,8 +2,10 @@ package com.evan.lazlo.ai
 
 import com.evan.lazlo.core.SecretStore
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.flowOn
 import okhttp3.*
@@ -33,6 +35,8 @@ class ApiKeyProvider(
         val authHeader: (key: String) -> Pair<String, String>,
         val buildBody: (List<ChatMessage>, model: String) -> JSONObject,
         val parseSseDelta: (JSONObject) -> String?,
+        /** Non-auth headers this endpoint requires on every request — see [anthropicDefault]'s `anthropic-version`. */
+        val extraHeaders: Map<String, String> = emptyMap(),
     )
 
     override val id get() = config.id
@@ -53,6 +57,7 @@ class ApiKeyProvider(
             .url(config.baseUrl)
             .addHeader(headerName, headerValue)
             .addHeader("Accept", "text/event-stream")
+            .apply { config.extraHeaders.forEach { (name, value) -> addHeader(name, value) } }
             .post(body)
             .build()
 
@@ -91,9 +96,20 @@ class ApiKeyProvider(
         })
 
         awaitClose { call.cancel() }
-    }.flowOn(Dispatchers.IO)
+    }
+        // callbackFlow's default buffer holds 64 elements, and this producer
+        // can only trySend (it runs on OkHttp's callback thread, where
+        // suspending isn't an option). Once a fast stream outruns a
+        // recomposing collector, trySend starts failing and those tokens are
+        // dropped silently — text simply missing from the middle of a reply.
+        // An unlimited buffer fuses into callbackFlow's own channel here.
+        .buffer(Channel.UNLIMITED)
+        .flowOn(Dispatchers.IO)
 
     companion object {
+        /** The Messages API version this request shape targets — sent on every Anthropic call. */
+        const val ANTHROPIC_API_VERSION = "2023-06-01"
+
         /** Ready-made config for Anthropic-shaped /v1/messages streaming. */
         fun anthropicDefault(model: String = "claude-sonnet-4-6") = Config(
             id = "anthropic",
@@ -118,6 +134,10 @@ class ApiKeyProvider(
             parseSseDelta = { json ->
                 json.optJSONObject("delta")?.optString("text", null)
             },
+            // `anthropic-version` is required on every /v1/messages call, not
+            // optional: without it the API rejects the request outright, so
+            // this backend could never have completed a single exchange.
+            extraHeaders = mapOf("anthropic-version" to ANTHROPIC_API_VERSION),
         )
 
         /**
@@ -137,6 +157,13 @@ class ApiKeyProvider(
                 JSONObject().apply {
                     put("model", model)
                     put("stream", true)
+                    // Without this, OpenRouter defaults to the model's max
+                    // output (16384 for gpt-4o) — confirmed against the real
+                    // API: that default alone triggers a 402 credit-limit
+                    // error on any account that can't cover 16384 tokens,
+                    // before a single token of the reply is generated.
+                    // Matches Anthropic's config, which already caps this.
+                    put("max_tokens", 1024)
                     put("messages", JSONArray(history.map { m ->
                         JSONObject().apply {
                             put(

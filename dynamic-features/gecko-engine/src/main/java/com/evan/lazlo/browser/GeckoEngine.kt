@@ -128,7 +128,20 @@ class GeckoEngine(private val context: Context) : BrowserEngine {
     }
 
     override fun destroy() {
-        session?.close()
+        // Detach the session from the view *before* closing it: GeckoView holds
+        // the session and its compositor display until releaseSession(), so
+        // closing first leaves the view bound to a dead session. This engine is
+        // destroyed and rebuilt on every engine/tab switch (see BrowserScreen),
+        // so a session leaked per teardown adds up fast.
+        runCatching { geckoView?.releaseSession() }
+        session?.let { s ->
+            // Delegates outlive the close otherwise, and a late callback would
+            // fire into a ViewModel this engine no longer belongs to.
+            s.navigationDelegate = null
+            s.progressDelegate = null
+            s.contentDelegate = null
+            runCatching { s.close() }
+        }
         geckoView = null
         session = null
     }

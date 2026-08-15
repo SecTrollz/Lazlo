@@ -42,6 +42,17 @@ class ApiKeyProviderConfigTest {
     }
 
     @Test
+    fun `openRouter request body caps max_tokens so a low-credit account can't be rejected before generating anything`() {
+        // Confirmed against the real API: omitting this entirely, OpenRouter
+        // defaults to the model's max output (16384 for gpt-4o) and returns
+        // a 402 credit-limit error before a single token streams back, on
+        // any account that can't cover that many tokens.
+        val config = ApiKeyProvider.openRouterDefault()
+        val body = config.buildBody(history, config.model)
+        assertEquals(1024, body.getInt("max_tokens"))
+    }
+
+    @Test
     fun `openRouter parses an OpenAI-shaped streaming delta`() {
         val config = ApiKeyProvider.openRouterDefault()
         val chunk = JSONObject(
@@ -55,6 +66,20 @@ class ApiKeyProviderConfigTest {
         val config = ApiKeyProvider.openRouterDefault()
         val chunk = JSONObject("""{"choices":[{"delta":{"role":"assistant"},"index":0}]}""")
         assertNull(config.parseSseDelta(chunk))
+    }
+
+    @Test
+    fun `anthropic config sends the required anthropic-version header`() {
+        // /v1/messages rejects any request without it, so this isn't cosmetic:
+        // omitting it makes every call on this backend fail before the model
+        // ever sees the prompt.
+        val config = ApiKeyProvider.anthropicDefault()
+        assertEquals("2023-06-01", config.extraHeaders["anthropic-version"])
+    }
+
+    @Test
+    fun `openRouter needs no extra headers beyond its bearer token`() {
+        assertEquals(emptyMap<String, String>(), ApiKeyProvider.openRouterDefault().extraHeaders)
     }
 
     @Test

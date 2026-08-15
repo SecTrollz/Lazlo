@@ -64,6 +64,32 @@ class TcpSegmentTest {
     }
 
     @Test
+    fun `nextSequence wraps within the 32-bit sequence space`() {
+        // A flow whose ISN lands near the top of the space wraps almost
+        // immediately; a counter that just kept adding would stop matching the
+        // sequence numbers actually on the wire (which are always 32-bit).
+        assertEquals(5L, TcpSegment.nextSequence(0xFFFFFFFBL, 10))
+        assertEquals(0L, TcpSegment.nextSequence(0xFFFFFFFFL, 1))
+        assertEquals(1_400L, TcpSegment.nextSequence(0L, 1_400))
+        // Whatever it produces must survive the wire round trip unchanged.
+        val wrapped = TcpSegment.nextSequence(0xFFFFFF00L, 0x200)
+        val built = TcpSegment.build(source, destination, 1, 2, wrapped, wrapped, TcpSegment.ACK, 65535, ByteArray(0))
+        assertEquals(wrapped, TcpSegment.parse(built)!!.sequenceNumber)
+    }
+
+    @Test
+    fun `isBeforeSequence uses serial arithmetic rather than plain comparison`() {
+        assertTrue(TcpSegment.isBeforeSequence(100L, 200L))
+        assertFalse(TcpSegment.isBeforeSequence(200L, 100L))
+        assertFalse(TcpSegment.isBeforeSequence(100L, 100L))
+        // Across a wrap: 0xFFFFFFFF precedes 1, even though it's numerically
+        // larger. A plain `a < b` gets this exactly backwards, which is how a
+        // retransmission after a wrap would be mistaken for a future segment.
+        assertTrue(TcpSegment.isBeforeSequence(0xFFFFFFFFL, 1L))
+        assertFalse(TcpSegment.isBeforeSequence(1L, 0xFFFFFFFFL))
+    }
+
+    @Test
     fun `checksum against the pseudo-header is internally consistent`() {
         val built = TcpSegment.build(source, destination, 1, 2, 0, 0, TcpSegment.ACK, 65535, "x".toByteArray())
         val pseudoHeader = ByteArray(12 + built.size)

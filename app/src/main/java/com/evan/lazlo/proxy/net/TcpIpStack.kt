@@ -84,10 +84,14 @@ class TcpIpStack(
             val n = withContext(Dispatchers.IO) {
                 runCatching { input.read(buffer) }.getOrDefault(-1)
             }
-            if (n <= 0) {
-                if (!running) break
-                continue
-            }
+            // A negative result means the TUN fd is closed or its read failed
+            // outright — there's nothing to recover from and no next packet
+            // coming. Treating that as "try again" (which is what looping on it
+            // regardless of `running` amounted to) turns a dead fd into a hot
+            // spin: no suspension point, no I/O wait, one core pinned for as
+            // long as the service lives.
+            if (n < 0) break
+            if (n == 0) continue
             val packet = IpV4Packet.parse(buffer, n) ?: continue
             when (packet.protocol) {
                 IpV4Packet.PROTOCOL_TCP -> handleTcp(packet)
@@ -143,12 +147,15 @@ class TcpIpStack(
 
     private suspend fun handleNewSyn(segment: TcpSegment, key: FlowKey) {
         val flow = TcpFlow(key)
-        flow.clientNextSeq = segment.sequenceNumber + 1
-        flow.serverSeq = random.nextInt().toLong() and 0xFFFFFFFFL
+        flow.clientNextSeq = TcpSegment.nextSequence(segment.sequenceNumber, 1)
+        flow.serverSeq = random.nextInt().toLong() and TcpSegment.SEQUENCE_MASK
         flows[key] = flow
 
         sendControlSegment(flow, seq = flow.serverSeq, ack = flow.clientNextSeq, flags = TcpSegment.SYN or TcpSegment.ACK)
-        flow.serverSeq += 1 // SYN consumes one sequence number
+        // SYN consumes one sequence number. Wrapping arithmetic throughout:
+        // the values here are compared against numbers parsed off the wire,
+        // which live in TCP's 32-bit space — see TcpSegment.nextSequence.
+        flow.serverSeq = TcpSegment.nextSequence(flow.serverSeq, 1)
     }
 
     private suspend fun handleHandshakeAck(segment: TcpSegment, flow: TcpFlow) {
@@ -189,20 +196,20 @@ class TcpIpStack(
             // once) or a genuinely out-of-order future segment, which is
             // dropped — see the class doc for why that's an accepted
             // simplification here rather than buffering/reordering it.
-            if (segment.sequenceNumber < flow.clientNextSeq) {
+            if (TcpSegment.isBeforeSequence(segment.sequenceNumber, flow.clientNextSeq)) {
                 sendControlSegment(flow, flow.serverSeq, flow.clientNextSeq, TcpSegment.ACK)
             }
             return
         }
 
         if (segment.payload.isNotEmpty()) {
-            flow.clientNextSeq += segment.payload.size
+            flow.clientNextSeq = TcpSegment.nextSequence(flow.clientNextSeq, segment.payload.size.toLong())
             flow.fromClient.trySend(segment.payload)
             sendControlSegment(flow, flow.serverSeq, flow.clientNextSeq, TcpSegment.ACK)
         }
 
         if (segment.fin) {
-            flow.clientNextSeq += 1
+            flow.clientNextSeq = TcpSegment.nextSequence(flow.clientNextSeq, 1)
             flow.fromClient.close()
             sendControlSegment(flow, flow.serverSeq, flow.clientNextSeq, TcpSegment.ACK)
         }
@@ -215,7 +222,7 @@ class TcpIpStack(
             val chunkSize = minOf(MAX_SEGMENT_SIZE, data.size - offset)
             val chunk = data.copyOfRange(offset, offset + chunkSize)
             sendControlSegment(flow, flow.serverSeq, flow.clientNextSeq, TcpSegment.ACK or TcpSegment.PSH, chunk)
-            flow.serverSeq += chunkSize
+            flow.serverSeq = TcpSegment.nextSequence(flow.serverSeq, chunkSize.toLong())
             offset += chunkSize
         }
     }
@@ -225,7 +232,7 @@ class TcpIpStack(
         if (!flow.localFinSent) {
             flow.localFinSent = true
             sendControlSegment(flow, flow.serverSeq, flow.clientNextSeq, TcpSegment.FIN or TcpSegment.ACK)
-            flow.serverSeq += 1
+            flow.serverSeq = TcpSegment.nextSequence(flow.serverSeq, 1)
         }
         flow.state = TcpFlowState.CLOSED
         flows.remove(flow.key)
@@ -305,7 +312,12 @@ class TcpIpStack(
             val reply = UdpDatagram.build(key.destinationPort, key.sourcePort, buffer.copyOf(length))
             writePacket(IpV4Packet.build(key.destinationAddress.toIpBytes(), key.sourceAddress.toIpBytes(), IpV4Packet.PROTOCOL_UDP, reply))
         }
-        udpSockets.remove(key)
+        // Conditional remove: by the time an idle timeout fires here, the packet
+        // pump may already have replaced this entry with a fresh socket for the
+        // same 4-tuple. An unconditional remove(key) would evict — and this
+        // coroutine's close() would then orphan — a socket someone else is
+        // actively using, silently black-holing that flow's replies.
+        udpSockets.remove(key, socket)
         runCatching { socket.close() }
     }
 

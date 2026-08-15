@@ -6,11 +6,13 @@ import com.google.ai.edge.aicore.DownloadConfig
 import com.google.ai.edge.aicore.GenerationConfig
 import com.google.ai.edge.aicore.GenerativeAIException
 import com.google.ai.edge.aicore.GenerativeModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
 
 /** Progress of AICore's own on-device model download, surfaced for the chat UI's readiness state. */
 sealed class AiCoreDownloadState {
@@ -181,6 +183,13 @@ class AiCoreProvider(private val context: Context) : AiProvider {
         }
         emit(ChatToken("", isFinal = true))
     }
+        // The isReady() fallback above runs prepareInferenceEngine(), which
+        // binds to the AICore system service and can trigger a first-run model
+        // download. ChatViewModel collects on viewModelScope (the main thread),
+        // where that's an ANR waiting to happen — ChatViewModel already takes
+        // care to build the provider off-thread, and this keeps the streaming
+        // path consistent with that.
+        .flowOn(Dispatchers.IO)
 
     /** Frees the native model resources AICore allocated for [model]; safe to call even if it was never loaded. */
     override fun close() {

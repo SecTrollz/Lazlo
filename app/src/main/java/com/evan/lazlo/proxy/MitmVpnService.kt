@@ -12,6 +12,7 @@ import androidx.core.app.ServiceCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
 /**
@@ -45,6 +46,13 @@ class MitmVpnService : VpnService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForegroundWithNotification()
 
+        // onStartCommand runs again on every startService() and on START_STICKY
+        // restart. Building a second interceptor and TUN interface on top of the
+        // first leaks the old ParcelFileDescriptor, its packet pump, and the
+        // Netty event loop behind it — all still reading a live fd — so tear
+        // down whatever is already running before establishing a new one.
+        stopCapture()
+
         val ca = CertificateAuthority(this)
         val caCertificate = ca.ensureCaExists()
         val caPrivateKey = ca.caPrivateKey()
@@ -69,22 +77,43 @@ class MitmVpnService : VpnService() {
         val builder = Builder()
             .addAddress("10.0.0.2", 32)
             .addRoute("0.0.0.0", 0)
-            .addDnsServer("1.1.1.1") // encrypted upstream (DoH) applied inside the interceptor
+            // Plain UDP DNS, relayed (and logged) through the interceptor's own
+            // protect()-ed socket like any other UDP — see TcpIpStack.handleUdp.
+            // Nothing here upgrades it to DoH/DoT.
+            .addDnsServer("1.1.1.1")
             .setSession("Lazlo Inspector")
 
-        vpnInterface = builder.establish()
-        vpnInterface?.let { fd ->
-            scope.launch { running.pump(fd) }
+        val established = builder.establish()
+        if (established == null) {
+            // establish() returns null when VPN consent isn't (or is no longer)
+            // granted. Without this the service would sit in the foreground
+            // showing a "capturing traffic" notification while capturing
+            // nothing at all — the one thing this notification must never lie
+            // about.
+            running.shutdown()
+            interceptor = null
+            stopSelf()
+            return START_NOT_STICKY
         }
+        vpnInterface = established
+        scope.launch { running.pump(established) }
         return START_STICKY
     }
 
     override fun onDestroy() {
+        stopCapture()
+        // The pump and every per-flow relay coroutine live in this scope; without
+        // cancelling it they keep running after the service is gone, reading a
+        // closed fd and holding the flows they were relaying.
+        scope.cancel()
+        super.onDestroy()
+    }
+
+    private fun stopCapture() {
         interceptor?.shutdown()
         interceptor = null
-        vpnInterface?.close()
+        runCatching { vpnInterface?.close() }
         vpnInterface = null
-        super.onDestroy()
     }
 
     /**

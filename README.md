@@ -100,10 +100,13 @@ pieces:
 The app has run on a real Pixel, not just in a build sandbox. It's also
 locked down so nothing else on the device can see into it: `FLAG_SECURE`
 blocks screenshots/screen-recording/Recents-thumbnail capture by other
-apps, there are no exported components beyond the launcher activity,
-backups are disabled entirely, and an explicit network security config
-pins outbound traffic to system-trusted CAs only with no cleartext
-fallback. See [`ARCHITECTURE.md`](ARCHITECTURE.md#no-other-app-gets-to-see-inside-lazlo)
+apps (a real toggle, on by default), there are no exported components
+beyond the launcher activity, and backups are disabled entirely. The
+network security config deliberately does *not* lock down further: it
+keeps cleartext allowed and trusts user-installed CAs, because both are
+load-bearing for a self-interception tool — see the paragraph further
+down and
+[`ARCHITECTURE.md`](ARCHITECTURE.md#no-other-app-gets-to-see-inside-lazlo)
 for the full rundown.
 
 AICore/Gemini Nano provisioning is now explicit rather than silent: the
@@ -143,7 +146,7 @@ signing, the Netty handshake, message-transcript folding, traffic-log
 formatting, address-bar resolution, backend/engine copy, AICore error
 diagnosis, BYOK request/response shaping, browser history/bookmarks
 codec, the rewrite engine against real HTTP byte layouts) is covered by
-85 passing JVM unit tests; see
+95 passing JVM unit tests; see
 [`ARCHITECTURE.md`](ARCHITECTURE.md#5-ui--the-three-screens).
 
 What's *not* yet fully proven out is the GeckoView module's actual
