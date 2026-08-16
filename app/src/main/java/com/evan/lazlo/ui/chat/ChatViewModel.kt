@@ -10,6 +10,8 @@ import com.evan.lazlo.ai.AiCoreProvider
 import com.evan.lazlo.ai.AiProvider
 import com.evan.lazlo.ai.AiProviderFactory
 import com.evan.lazlo.ai.ChatMessage
+import com.evan.lazlo.ai.LocalModelDownloadState
+import com.evan.lazlo.ai.LocalModelDownloader
 import com.evan.lazlo.core.SecretStore
 import com.evan.lazlo.core.Settings
 import kotlinx.coroutines.Dispatchers
@@ -42,6 +44,10 @@ data class ChatUiState(
     val backendLoading: Boolean = true,
     val aiCoreSetupRunning: Boolean = false,
     val aiCoreSetupState: AiCoreDownloadState? = null,
+    /** Whether a Hugging Face token is saved — gates whether the local-model row offers "Download" or "Add token" first. */
+    val huggingFaceTokenConfigured: Boolean = false,
+    val localModelDownloadRunning: Boolean = false,
+    val localModelDownloadState: LocalModelDownloadState? = null,
 ) {
     /** The row for whichever backend is currently selected, if it's known yet. */
     val activeBackend: BackendRow? get() = backendRows.find { it.id == activeProviderId }
@@ -52,6 +58,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val settings = Settings(application)
     private val secretStore = SecretStore(application)
     private val aiProviderFactory = AiProviderFactory(application, settings, secretStore)
+    private val localModelDownloader = LocalModelDownloader(application, secretStore)
 
     private val _uiState = MutableStateFlow(ChatUiState())
     val uiState: StateFlow<ChatUiState> = _uiState.asStateFlow()
@@ -61,9 +68,47 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         viewModelScope.launch {
-            val choice = settings.aiChoice()
-            _uiState.update { it.copy(activeProviderId = choiceToProviderId(choice)) }
+            // refreshBackendRows() first, not after: it already probes
+            // AiCoreProvider.isReady() for every candidate's checkmark
+            // (see its `ready` map below), so resolveInitialBackend() can
+            // read that result straight off the rows it just populated
+            // instead of instantiating a second AiCoreProvider and paying
+            // for — or, worse, redundantly *triggering* — that same probe
+            // (isReady() is also what kicks off Gemini Nano's first-run
+            // download) a second time in the same launch.
             refreshBackendRows()
+            resolveInitialBackend()
+        }
+    }
+
+    /**
+     * Picks what plays on the very first launch, before the user has ever
+     * touched the backend picker — [Settings.aiChoice] on its own would
+     * silently default to the Anthropic BYOK row, which does nothing
+     * until a key's typed in. Instead: AICore first (fully offline, zero
+     * setup, if this device/account has the on-device LLM feature
+     * switched on — [refreshBackendRows] already checked), then a model
+     * file [LocalModelDownloader] already fetched in an earlier session,
+     * and only fall through to the BYOK default if neither offline option
+     * is usable yet. Whichever one works gets persisted via
+     * [Settings.setAiChoice] so this only ever runs once, not on every
+     * app open.
+     */
+    private suspend fun resolveInitialBackend() {
+        if (settings.hasChosenAiBackend()) {
+            _uiState.update { it.copy(activeProviderId = choiceToProviderId(settings.aiChoice())) }
+            return
+        }
+        val aiCoreReady = _uiState.value.backendRows.find { it.id == AiBackendCopy.AICORE_PROVIDER_ID }?.isReady == true
+        val autoChoice = when {
+            aiCoreReady -> Settings.AiChoice.AiCore
+            else -> localModelDownloader.downloadedModelPath()?.let { Settings.AiChoice.LocalModel(it) }
+        }
+        if (autoChoice != null) {
+            settings.setAiChoice(autoChoice)
+            _uiState.update { it.copy(activeProviderId = choiceToProviderId(autoChoice)) }
+        } else {
+            _uiState.update { it.copy(activeProviderId = choiceToProviderId(settings.aiChoice())) }
         }
     }
 
@@ -77,8 +122,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             activeProvider = null
             val choice = when (providerId) {
                 AiBackendCopy.AICORE_PROVIDER_ID -> Settings.AiChoice.AiCore
-                AiBackendCopy.MEDIAPIPE_PROVIDER_ID ->
-                    Settings.AiChoice.LocalModel((settings.aiChoice() as? Settings.AiChoice.LocalModel)?.path ?: "")
+                AiBackendCopy.MEDIAPIPE_PROVIDER_ID -> {
+                    // Prefer whatever path is already configured (a manually
+                    // supplied file, or a prior download); fall back to a
+                    // download this session already completed but hadn't
+                    // been switched to yet, e.g. after downloading while a
+                    // different backend was still selected.
+                    val existingPath = (settings.aiChoice() as? Settings.AiChoice.LocalModel)?.path?.takeIf { it.isNotBlank() }
+                    Settings.AiChoice.LocalModel(existingPath ?: localModelDownloader.downloadedModelPath() ?: "")
+                }
                 AiBackendCopy.OPENROUTER_PROVIDER_ID -> Settings.AiChoice.ApiKey(AiBackendCopy.OPENROUTER_PROVIDER_ID)
                 else -> Settings.AiChoice.ApiKey(AiBackendCopy.API_KEY_PROVIDER_ID)
             }
@@ -99,6 +151,57 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun clearApiKey(providerId: String) {
         secretStore.clearApiKey(providerId)
         viewModelScope.launch { refreshBackendRows() }
+    }
+
+    /** Saves the Hugging Face token [LocalModelDownloader] needs to fetch the offline model — same never-shown-again handling as a BYOK key. */
+    fun saveHuggingFaceToken(rawToken: String) {
+        val trimmed = rawToken.trim()
+        if (trimmed.isEmpty()) return
+        localModelDownloader.saveToken(trimmed)
+        viewModelScope.launch { refreshBackendRows() }
+    }
+
+    fun clearHuggingFaceToken() {
+        localModelDownloader.clearToken()
+        viewModelScope.launch { refreshBackendRows() }
+    }
+
+    /**
+     * Downloads the offline model and, on success, switches straight to
+     * it — same "finish the setup, then just use it" shape as
+     * [setupAiCore]. Requires a token to already be saved; the picker UI
+     * only shows this action once one is, so reaching this without one
+     * would be a UI bug, not a user-facing error worth its own message.
+     */
+    fun startLocalModelDownload() {
+        if (_uiState.value.localModelDownloadRunning) return
+        _uiState.update { it.copy(localModelDownloadRunning = true, localModelDownloadState = null) }
+        viewModelScope.launch {
+            val progressJob = launch {
+                localModelDownloader.downloadState.collect { state ->
+                    _uiState.update { it.copy(localModelDownloadState = state) }
+                }
+            }
+            localModelDownloader.download()
+            progressJob.cancel()
+            // Read the terminal state directly rather than trust that the
+            // collector above already delivered it into _uiState — download()
+            // returning only guarantees downloadState.value itself is final,
+            // not that a StateFlow collector running in a separate coroutine
+            // has processed that last emission before progressJob.cancel() runs.
+            val finalState = localModelDownloader.downloadState.value
+            _uiState.update { it.copy(localModelDownloadRunning = false, localModelDownloadState = finalState) }
+            if (finalState is LocalModelDownloadState.Completed) {
+                selectBackend(AiBackendCopy.MEDIAPIPE_PROVIDER_ID)
+            } else {
+                refreshBackendRows()
+            }
+        }
+    }
+
+    fun dismissLocalModelDownload() {
+        localModelDownloader.resetState()
+        _uiState.update { it.copy(localModelDownloadState = null) }
     }
 
     fun dismissError() {
@@ -213,6 +316,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 AiBackendCopy.OPENROUTER_PROVIDER_ID to (secretStore.getApiKey(AiBackendCopy.OPENROUTER_PROVIDER_ID) != null),
             )
         }
+        val huggingFaceTokenConfigured = withContext(Dispatchers.IO) { localModelDownloader.isTokenConfigured() }
+        val downloadedModelPath = withContext(Dispatchers.IO) { localModelDownloader.downloadedModelPath() }
 
         val rows = listOf(
             BackendRow(
@@ -239,19 +344,20 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             BackendRow(
                 id = AiBackendCopy.MEDIAPIPE_PROVIDER_ID,
                 displayName = "Local model file (on-device)",
-                explanation = if (localPath == null) {
-                    "No model file configured yet. ${AiBackendCopy.explanation(AiBackendCopy.MEDIAPIPE_PROVIDER_ID)}"
-                } else {
-                    AiBackendCopy.explanation(AiBackendCopy.MEDIAPIPE_PROVIDER_ID)
+                explanation = when {
+                    localPath != null -> AiBackendCopy.explanation(AiBackendCopy.MEDIAPIPE_PROVIDER_ID)
+                    downloadedModelPath != null -> "${LocalModelDownloader.MODEL_DISPLAY_NAME} is downloaded and ready — select this row to switch to it."
+                    else -> "No model file configured yet. ${AiBackendCopy.explanation(AiBackendCopy.MEDIAPIPE_PROVIDER_ID)}"
                 },
                 isOnDevice = true,
-                isReady = ready.containsKey(AiBackendCopy.MEDIAPIPE_PROVIDER_ID),
+                isReady = ready.containsKey(AiBackendCopy.MEDIAPIPE_PROVIDER_ID) || downloadedModelPath != null,
             ),
         )
         _uiState.update {
             it.copy(
                 backendRows = rows,
                 apiKeyConfiguredByProvider = apiKeyConfiguredByProvider,
+                huggingFaceTokenConfigured = huggingFaceTokenConfigured,
                 backendLoading = false,
             )
         }

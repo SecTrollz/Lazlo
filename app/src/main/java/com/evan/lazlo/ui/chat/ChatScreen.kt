@@ -23,10 +23,6 @@ import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -56,6 +52,10 @@ import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.evan.lazlo.ai.AiCoreDownloadState
 import com.evan.lazlo.ai.ChatMessage
+import com.evan.lazlo.ai.LocalModelDownloadState
+import com.evan.lazlo.ai.LocalModelDownloader
+import com.evan.lazlo.ui.theme.FootstepLoader
+import com.evan.lazlo.ui.theme.ScrollCard
 
 /**
  * The chat tab: the message transcript, the input row, and — up top —
@@ -75,6 +75,7 @@ fun ChatScreen(
     // Nullable rather than a Boolean because there are now two BYOK
     // backends (Anthropic, OpenRouter), each with its own stored key.
     var manageKeyProviderId by remember { mutableStateOf<String?>(null) }
+    var showHuggingFaceTokenDialog by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
 
     LaunchedEffect(state.messages.size) {
@@ -129,12 +130,19 @@ fun ChatScreen(
                 manageKeyProviderId = providerId
             },
             onSetupAiCore = viewModel::setupAiCore,
+            onManageHuggingFaceToken = {
+                showBackendPicker = false
+                showHuggingFaceTokenDialog = true
+            },
+            onStartLocalModelDownload = viewModel::startLocalModelDownload,
+            onDismissLocalModelDownload = viewModel::dismissLocalModelDownload,
             onDismiss = { showBackendPicker = false },
         )
     }
 
     manageKeyProviderId?.let { providerId ->
         ApiKeyDialog(
+            providerId = providerId,
             providerDisplayName = AiBackendCopy.serviceName(providerId),
             alreadyConfigured = state.apiKeyConfiguredByProvider[providerId] == true,
             onSave = { key ->
@@ -146,6 +154,21 @@ fun ChatScreen(
                 manageKeyProviderId = null
             },
             onDismiss = { manageKeyProviderId = null },
+        )
+    }
+
+    if (showHuggingFaceTokenDialog) {
+        HuggingFaceTokenDialog(
+            alreadyConfigured = state.huggingFaceTokenConfigured,
+            onSave = { token ->
+                viewModel.saveHuggingFaceToken(token)
+                showHuggingFaceTokenDialog = false
+            },
+            onClear = {
+                viewModel.clearHuggingFaceToken()
+                showHuggingFaceTokenDialog = false
+            },
+            onDismiss = { showHuggingFaceTokenDialog = false },
         )
     }
 }
@@ -233,7 +256,7 @@ private fun TypingIndicator() {
             shape = MaterialTheme.shapes.medium,
         ) {
             Row(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                FootstepLoader(footprintSize = 9.dp, color = MaterialTheme.colorScheme.primary)
                 Spacer(modifier = Modifier.size(8.dp))
                 Text("Thinking…", style = MaterialTheme.typography.bodySmall)
             }
@@ -294,10 +317,13 @@ private fun BackendPickerDialog(
     onSelect: (String) -> Unit,
     onManageKey: (providerId: String) -> Unit,
     onSetupAiCore: () -> Unit,
+    onManageHuggingFaceToken: () -> Unit,
+    onStartLocalModelDownload: () -> Unit,
+    onDismissLocalModelDownload: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     Dialog(onDismissRequest = onDismiss) {
-        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+        ScrollCard {
             Column(modifier = Modifier.padding(20.dp)) {
                 Text("Choose an AI backend", style = MaterialTheme.typography.titleMedium)
                 Text(
@@ -359,6 +385,17 @@ private fun BackendPickerDialog(
                                         onSetup = onSetupAiCore,
                                     )
                                 }
+                                if (row.id == AiBackendCopy.MEDIAPIPE_PROVIDER_ID) {
+                                    LocalModelDownloadSection(
+                                        alreadyAvailable = row.isReady,
+                                        tokenConfigured = state.huggingFaceTokenConfigured,
+                                        running = state.localModelDownloadRunning,
+                                        downloadState = state.localModelDownloadState,
+                                        onAddToken = onManageHuggingFaceToken,
+                                        onDownload = onStartLocalModelDownload,
+                                        onDismissFailure = onDismissLocalModelDownload,
+                                    )
+                                }
                             }
                         }
                     }
@@ -397,7 +434,7 @@ private fun AiCoreSetupSection(
                     )
                 } else {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                        FootstepLoader(footprintSize = 9.dp, color = MaterialTheme.colorScheme.primary)
                         Spacer(modifier = Modifier.size(8.dp))
                         Text("Setting up Gemini Nano on this device…", style = MaterialTheme.typography.bodySmall)
                     }
@@ -424,8 +461,82 @@ private fun AiCoreSetupSection(
     }
 }
 
+/**
+ * Inline "get the free offline model" control shown under the local-model
+ * row in [BackendPickerDialog] — the no-API-key path for devices where
+ * AICore isn't available. Same shape as [AiCoreSetupSection] (a button, a
+ * real progress bar, a plain-language failure reason), plus one extra
+ * state that section doesn't need: no Hugging Face token saved yet, since
+ * the model download itself is gated behind one — see
+ * [LocalModelDownloader]'s doc comment for why that's unavoidable.
+ */
+@Composable
+private fun LocalModelDownloadSection(
+    alreadyAvailable: Boolean,
+    tokenConfigured: Boolean,
+    running: Boolean,
+    downloadState: LocalModelDownloadState?,
+    onAddToken: () -> Unit,
+    onDownload: () -> Unit,
+    onDismissFailure: () -> Unit,
+) {
+    when {
+        running -> {
+            Column(modifier = Modifier.padding(top = 4.dp)) {
+                val downloading = downloadState as? LocalModelDownloadState.Downloading
+                if (downloading != null && downloading.totalBytes > 0) {
+                    val fraction = (downloading.bytesDownloaded.toFloat() / downloading.totalBytes).coerceIn(0f, 1f)
+                    LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth())
+                    Text(
+                        "Downloading ${LocalModelDownloader.MODEL_DISPLAY_NAME}… " +
+                            "${downloading.bytesDownloaded / 1_000_000} / ${downloading.totalBytes / 1_000_000} MB",
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(top = 2.dp),
+                    )
+                } else {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        FootstepLoader(footprintSize = 9.dp, color = MaterialTheme.colorScheme.primary)
+                        Spacer(modifier = Modifier.size(8.dp))
+                        Text("Starting download…", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
+        }
+        downloadState is LocalModelDownloadState.Failed -> {
+            Column(modifier = Modifier.padding(top = 4.dp)) {
+                Text(
+                    downloadState.message,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+                Row(modifier = Modifier.padding(top = 2.dp)) {
+                    TextButton(onClick = onDownload) { Text("Try again") }
+                    TextButton(onClick = onDismissFailure) { Text("Dismiss") }
+                }
+            }
+        }
+        // Already has a usable model (a prior download, or a manually
+        // supplied path) — the row's own explanation text already covers
+        // this; nothing extra to show here.
+        alreadyAvailable -> {}
+        !tokenConfigured -> {
+            TextButton(onClick = onAddToken, modifier = Modifier.padding(top = 2.dp)) {
+                Icon(Icons.Filled.Key, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.size(4.dp))
+                Text("Add Hugging Face token to download a free model")
+            }
+        }
+        else -> {
+            TextButton(onClick = onDownload, modifier = Modifier.padding(top = 2.dp)) {
+                Text("Download ${LocalModelDownloader.MODEL_DISPLAY_NAME} (~${LocalModelDownloader.EXPECTED_SIZE_BYTES / 1_000_000}MB)")
+            }
+        }
+    }
+}
+
 @Composable
 private fun ApiKeyDialog(
+    providerId: String,
     providerDisplayName: String,
     alreadyConfigured: Boolean,
     onSave: (String) -> Unit,
@@ -434,12 +545,20 @@ private fun ApiKeyDialog(
 ) {
     var input by remember { mutableStateOf("") }
     var reveal by remember { mutableStateOf(false) }
+    // Advisory only — pasting the other BYOK provider's key here is the
+    // single most common way a saved key ends up dead on arrival, and
+    // without this it only ever surfaces later as an opaque "HTTP 401
+    // authentication_error" from the wrong provider. Still lets Save stay
+    // enabled: see AiBackendCopy.keyFormatWarning for why this doesn't block.
+    val keyFormatWarning = remember(providerId, input) { AiBackendCopy.keyFormatWarning(providerId, input) }
 
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(if (alreadyConfigured) "Change your $providerDisplayName API key" else "Add your $providerDisplayName API key") },
-        text = {
-            Column {
+    Dialog(onDismissRequest = onDismiss) {
+        ScrollCard {
+            Column(modifier = Modifier.padding(20.dp)) {
+                Text(
+                    if (alreadyConfigured) "Change your $providerDisplayName API key" else "Add your $providerDisplayName API key",
+                    style = MaterialTheme.typography.titleMedium,
+                )
                 Text(
                     if (alreadyConfigured) {
                         "A key is already saved for this backend (it's never shown again once saved — enter a new one to replace it)."
@@ -447,13 +566,14 @@ private fun ApiKeyDialog(
                         "Stored only on this device, encrypted by Android Keystore. Never shown in plain text once saved."
                     },
                     style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.padding(bottom = 12.dp),
+                    modifier = Modifier.padding(top = 4.dp, bottom = 12.dp),
                 )
                 OutlinedTextField(
                     value = input,
                     onValueChange = { input = it },
                     placeholder = { Text("sk-...") },
                     singleLine = true,
+                    isError = keyFormatWarning != null,
                     visualTransformation = if (reveal) VisualTransformation.None else PasswordVisualTransformation(),
                     trailingIcon = {
                         IconButton(onClick = { reveal = !reveal }) {
@@ -464,18 +584,110 @@ private fun ApiKeyDialog(
                         }
                     },
                 )
+                keyFormatWarning?.let { warning ->
+                    Text(
+                        warning,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
                 if (alreadyConfigured) {
                     TextButton(onClick = onClear, modifier = Modifier.padding(top = 8.dp)) {
                         Text("Remove saved key")
                     }
                 }
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+                    horizontalArrangement = Arrangement.End,
+                ) {
+                    TextButton(onClick = onDismiss) { Text("Cancel") }
+                    TextButton(onClick = { onSave(input) }, enabled = input.isNotBlank()) { Text("Save") }
+                }
             }
-        },
-        confirmButton = {
-            TextButton(onClick = { onSave(input) }, enabled = input.isNotBlank()) { Text("Save") }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
-        },
-    )
+        }
+    }
+}
+
+/**
+ * Collects the free Hugging Face token [LocalModelDownloader] needs to
+ * fetch the offline model. Same shape as [ApiKeyDialog] — a masked field,
+ * encrypted storage, never shown again once saved — but with its own copy
+ * spelling out the one-time setup: create an account, accept Gemma's
+ * license, generate a token. That's friction [ApiKeyDialog] doesn't have,
+ * but it's free and one-time, not a paid per-message key.
+ */
+@Composable
+private fun HuggingFaceTokenDialog(
+    alreadyConfigured: Boolean,
+    onSave: (String) -> Unit,
+    onClear: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var input by remember { mutableStateOf("") }
+    var reveal by remember { mutableStateOf(false) }
+    val formatWarning = remember(input) { AiBackendCopy.huggingFaceTokenFormatWarning(input) }
+
+    Dialog(onDismissRequest = onDismiss) {
+        ScrollCard {
+            Column(modifier = Modifier.padding(20.dp)) {
+                Text(
+                    if (alreadyConfigured) "Change your Hugging Face token" else "Add a Hugging Face token",
+                    style = MaterialTheme.typography.titleMedium,
+                )
+                Text(
+                    "Free — only used to download ${LocalModelDownloader.MODEL_DISPLAY_NAME} once, nothing else. " +
+                        "1) Create a free account and accept the license at ${LocalModelDownloader.MODEL_INFO_URL}. " +
+                        "2) Generate a token at ${LocalModelDownloader.TOKEN_SETTINGS_URL}. 3) Paste it below.",
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(top = 4.dp, bottom = 8.dp),
+                )
+                Text(
+                    if (alreadyConfigured) {
+                        "A token is already saved (it's never shown again once saved — enter a new one to replace it)."
+                    } else {
+                        "Stored only on this device, encrypted by Android Keystore."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(bottom = 12.dp),
+                )
+                OutlinedTextField(
+                    value = input,
+                    onValueChange = { input = it },
+                    placeholder = { Text("hf_...") },
+                    singleLine = true,
+                    isError = formatWarning != null,
+                    visualTransformation = if (reveal) VisualTransformation.None else PasswordVisualTransformation(),
+                    trailingIcon = {
+                        IconButton(onClick = { reveal = !reveal }) {
+                            Icon(
+                                if (reveal) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                contentDescription = if (reveal) "Hide token while typing" else "Show token while typing",
+                            )
+                        }
+                    },
+                )
+                formatWarning?.let { warning ->
+                    Text(
+                        warning,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
+                if (alreadyConfigured) {
+                    TextButton(onClick = onClear, modifier = Modifier.padding(top = 8.dp)) {
+                        Text("Remove saved token")
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+                    horizontalArrangement = Arrangement.End,
+                ) {
+                    TextButton(onClick = onDismiss) { Text("Cancel") }
+                    TextButton(onClick = { onSave(input) }, enabled = input.isNotBlank()) { Text("Save") }
+                }
+            }
+        }
+    }
 }
