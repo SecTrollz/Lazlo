@@ -105,6 +105,18 @@ class GeckoEngine(private val context: Context) : BrowserEngine {
 
     override fun loadUrl(url: String) { session?.loadUri(url) }
 
+    /**
+     * GeckoSession has no public evaluate-and-return-result API (that's an
+     * internal WebExtension content-script mechanism, not exposed here) —
+     * so this uses the same `javascript:` URI navigation every browser has
+     * supported since bookmarklets existed. Wrapped in `void function(){
+     * ... }()` so the script's own return value never becomes the new
+     * document (the historical footgun with `javascript:` URIs: an
+     * unvoided non-undefined result replaces the page instead of just
+     * running).
+     */
+    override fun runScript(js: String) { session?.loadUri("javascript:void function(){$js}();") }
+
     override fun goBack(): Boolean {
         if (!canGoBackState) return false
         session?.goBack()

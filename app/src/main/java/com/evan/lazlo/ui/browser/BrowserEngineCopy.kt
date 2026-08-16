@@ -10,13 +10,13 @@ object BrowserEngineCopy {
 
     fun explanation(kind: EngineKind): String = when (kind) {
         EngineKind.CHROMIUM ->
-            "Your device's built-in WebView (Chromium) — the same engine most apps use for in-app web pages. No extra download, stays current via Play."
+            "Your device's built-in WebView — the real Chromium engine, the same one Chrome itself runs on. Android layers a couple of tells on top by default (a \"; wv)\" marker in the User-Agent, an \"Android WebView\" Client Hints brand) that let sites fingerprint it as an embedded browser and block it; this engine strips both, so it presents as the genuine Chrome build it actually is. No extra download."
         EngineKind.GECKO ->
-            "Firefox's engine (GeckoView) instead of your device's built-in one, with its own independent tracking protection and certificate checks."
+            "Firefox's engine (GeckoView) — the default, since it's fully independent of the device's built-in WebView rather than a hardened version of it. Its own tracking protection and certificate checks too. Downloads once, the first time it's needed."
     }
 
     fun shortLabel(kind: EngineKind): String = when (kind) {
-        EngineKind.CHROMIUM -> "System WebView"
-        EngineKind.GECKO -> "GeckoView (Firefox engine)"
+        EngineKind.CHROMIUM -> "Chromium (hardened WebView)"
+        EngineKind.GECKO -> "GeckoView (Firefox engine) — default"
     }
 }

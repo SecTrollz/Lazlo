@@ -70,14 +70,41 @@ Settings and persisted via DataStore:
   `firebase-ai` on-device GenAI APIs (Pixel 9a supports this natively).
   Fully offline; nothing leaves the device on this path.
 - **MediaPipeProvider** — MediaPipe LLM Inference API loading a
-  user-supplied `.task`/gguf-converted model file from local storage
-  (e.g. Gemma 2B/3 quantized, or any MediaPipe-compatible weights).
-  Also fully offline; lets you run a model of your choosing rather than
-  being limited to what AICore ships.
+  `.task`-converted model file from local storage: either a user-supplied
+  one, or one `LocalModelDownloader` fetched. Also fully offline; lets
+  you run a model of your choosing rather than being limited to what
+  AICore ships.
 
 `AiProviderFactory` reads the persisted choice and constructs the active
 provider; the chat UI only ever talks to the `AiProvider` interface, so
 switching backends is a Settings toggle, not a code change.
+
+**`LocalModelDownloader` — the free, no-API-key fallback.** Fetches
+Gemma 3 270M (`gemma3-270m-it-q8.task`, ~290MB — MediaPipe's smallest
+instruction-tuned bundle) so `MediaPipeProvider` has something to run
+without the user sourcing a model file themselves. **Why it still needs
+a token**: every ready-to-use `.task` bundle for MediaPipe's LLM
+Inference API is published under Google's Gemma license on Hugging
+Face, which gates the file bytes behind a logged-in account that's
+accepted the license (verified directly against the HF API: the repo
+reports `"gated":"auto"`, an unauthenticated request for the file 401s
+with `GatedRepo`). There's no ungated equivalent — other small models
+aren't published as ready `.task` bundles, only as source weights that
+would need MediaPipe's own conversion pipeline. A free Hugging Face
+token (stored via `SecretStore`, same as a BYOK key) is the least
+friction available, not a missing shortcut. Downloads to a `.part` file
+first, renamed into place only on a full read — `isCompleteDownload()`'s
+exact-size check means a half-written file never gets mistaken for a
+ready model.
+
+**Backend auto-selection on first launch.** Rather than silently
+defaulting to the Anthropic BYOK row (which does nothing until a key's
+typed in — `Settings.aiChoice()`'s own static default), `ChatViewModel`
+tries AICore first, then a `LocalModelDownloader` download from an
+earlier session, before falling through to BYOK — see
+`ChatViewModel.resolveInitialBackend()`. Whichever one works is
+persisted, so this only runs once per install
+(`Settings.hasChosenAiBackend()`), not on every app open.
 
 **AICore provisioning.** `AiCoreProvider.isReady()` doesn't just build a
 `GenerativeModel` — it calls `prepareInferenceEngine()`, which is what
@@ -113,7 +140,20 @@ interface BrowserEngine {
 - **ChromiumEngine** — thin wrapper around Android's system `WebView`
   (Chromium-based). Zero extra APK size, uses whatever WebView version
   is installed/updated via Play, sandboxed the way any WebView is. Lives
-  in the base `:app` module.
+  in the base `:app` module. **Hardened, not raw**: WebView *is*
+  Chromium, but Android layers two tells on top of it that sites use to
+  fingerprint and block "embedded browsers" specifically — a `; wv)`
+  marker in the User-Agent string, and (on newer WebView builds) an
+  "Android WebView" brand entry in User-Agent Client Hints
+  (`navigator.userAgentData`, the `Sec-CH-UA` header). `attach()` strips
+  both via `hardenFingerprint()` before the first load, so this presents
+  as the real Chrome build it's actually running rather than the wrapper
+  around it. The UA-string half of that is pulled out as a pure function,
+  `ChromiumUserAgent.stripEmbeddedBrowserMarkers()`, since it doesn't
+  need a live WebView to test; the Client Hints half goes through
+  `androidx.webkit`'s `WebSettingsCompat`, gated on
+  `WebViewFeature.USER_AGENT_METADATA` for WebView builds too old to
+  support it.
 - **GeckoEngine** — wraps Mozilla's **GeckoView** (`org.mozilla.geckoview`).
   Adds ~30–50MB, so it lives entirely in its own dynamic feature module,
   `dynamic-features/gecko-engine/` (Gradle project `:dynamic-features:gecko_engine`
@@ -137,7 +177,13 @@ interface BrowserEngine {
 Engine choice is a per-tab or global Settings toggle; both implementations
 route their network layer through the same local proxy port when the
 inspector is enabled (see below), so traffic capture works identically
-regardless of engine.
+regardless of engine. **GeckoView is the default** (`Settings.browserEngine()`),
+not WebView — it doesn't carry WebView's embedded-browser fingerprint at
+all, rather than needing it stripped off. `BrowserViewModel` renders on
+Chromium only as a stopgap for the very first screen when Gecko's module
+hasn't downloaded yet (first launch, a fresh install, cleared data), and
+kicks off that download itself instead of silently settling for WebView
+the way it used to — see the `init` block's comment.
 
 **This is a real multi-tab browser, not a single bare WebView surface**:
 a tab strip (open/close/switch tabs), history, bookmarks (star icon next
@@ -453,7 +499,7 @@ just hidden) is a reasonable follow-up, not done here.
 dependencies {
     implementation "androidx.datastore:datastore-preferences:1.1.1"
     implementation "androidx.security:security-crypto:1.1.0-alpha06"
-    implementation "com.google.mediapipe:tasks-genai:0.10.14"
+    implementation "com.google.mediapipe:tasks-genai:0.10.35" // Gemma 3 support (LocalModelDownloader's model)
     implementation "com.google.ai.edge.aicore:aicore:0.0.1-exp02"
     // On-demand module install/progress — see BrowserEngineLoader.kt.
     implementation "com.google.android.play:feature-delivery:2.1.0"

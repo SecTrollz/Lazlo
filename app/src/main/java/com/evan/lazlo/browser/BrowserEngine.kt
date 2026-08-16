@@ -34,6 +34,18 @@ interface BrowserEngine {
 
     fun attach(container: ViewGroup)
     fun loadUrl(url: String)
+
+    /**
+     * Runs [js] in the current page's own JS context — the engine hook
+     * behind [com.evan.lazlo.browser.BrowserScript] (a Tampermonkey-style
+     * userscript run against pages the user chooses, entirely within that
+     * page's own sandbox). Distinct from the Inspector's rewrite rules,
+     * which edit request/response bytes at the proxy layer before a page
+     * ever sees them — this acts on the live DOM after the page has
+     * already loaded normally. Fire-and-forget: no result is read back.
+     */
+    fun runScript(js: String)
+
     fun goBack(): Boolean
     fun goForward(): Boolean
 
