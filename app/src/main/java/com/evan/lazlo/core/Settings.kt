@@ -36,6 +36,7 @@ class Settings(private val context: Context) {
     private val keyEngine = stringPreferencesKey("browser_engine")
     private val keyInspectorEnabled = stringPreferencesKey("inspector_enabled")
     private val keyScreenshotProtection = stringPreferencesKey("screenshot_protection_enabled")
+    private val keyPillPrivacy = stringPreferencesKey("inspector_pill_privacy")
 
     suspend fun setAiChoice(choice: AiChoice) {
         context.dataStore.edit { prefs ->
@@ -68,13 +69,32 @@ class Settings(private val context: Context) {
     /** Convenience for call sites (e.g. AiProviderFactory) not already in a coroutine. */
     fun aiChoiceBlocking(): AiChoice = runBlocking { aiChoice() }
 
+    /**
+     * True once [setAiChoice] has ever been called — distinct from
+     * [aiChoice] itself, which always returns *something* (falling back
+     * to the Anthropic BYOK row) even when nothing's actually been
+     * picked. ChatViewModel uses this to tell "fresh install, auto-pick
+     * the best zero-setup backend" apart from "user genuinely chose BYOK".
+     */
+    suspend fun hasChosenAiBackend(): Boolean =
+        context.dataStore.data.first().contains(keyAiChoice)
+
     suspend fun setBrowserEngine(kind: EngineKind) {
         context.dataStore.edit { it[keyEngine] = kind.name }
     }
 
     suspend fun browserEngine(): EngineKind {
         val v = context.dataStore.data.first()[keyEngine]
-        return runCatching { EngineKind.valueOf(v ?: "") }.getOrDefault(EngineKind.CHROMIUM)
+        // GeckoView, not the system WebView, is the default: it doesn't
+        // carry WebView's embedded-browser fingerprint (the "; wv)" UA
+        // token and, on newer builds, an "Android WebView" User-Agent
+        // Client Hints brand — see ChromiumEngine.hardenFingerprint for
+        // where those get stripped when Chromium's picked instead) in the
+        // first place. BrowserViewModel handles the case where nothing's
+        // been picked yet and the Gecko module hasn't downloaded — it
+        // fetches it automatically instead of silently settling for
+        // WebView.
+        return runCatching { EngineKind.valueOf(v ?: "") }.getOrDefault(EngineKind.GECKO)
     }
 
     suspend fun setInspectorEnabled(enabled: Boolean) {
@@ -99,4 +119,18 @@ class Settings(private val context: Context) {
      */
     fun screenshotProtectionFlow(): Flow<Boolean> =
         context.dataStore.data.map { it[keyScreenshotProtection]?.toBoolean() ?: true }
+
+    suspend fun setPillPrivacyEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[keyPillPrivacy] = enabled.toString() }
+    }
+
+    /**
+     * Off by default — the pill's numbers (capture count, recent hosts)
+     * show plainly until turned on. [InspectorPillOverlay] masks them to
+     * "••" while this is on, for glancing at the pill's status without
+     * putting live counts/hostnames on screen (a call, screen share,
+     * over someone's shoulder).
+     */
+    fun pillPrivacyFlow(): Flow<Boolean> =
+        context.dataStore.data.map { it[keyPillPrivacy]?.toBoolean() ?: false }
 }

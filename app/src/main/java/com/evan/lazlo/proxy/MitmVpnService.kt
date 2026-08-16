@@ -72,6 +72,24 @@ class MitmVpnService : VpnService() {
             .addDnsServer("1.1.1.1") // encrypted upstream (DoH) applied inside the interceptor
             .setSession("Lazlo Inspector")
 
+        // Without this, Lazlo's own network calls (chat requests to
+        // Anthropic/OpenRouter, the Hugging Face model download) get
+        // captured by this same VPN like any other app's traffic — routed
+        // through TcpIpStack, TLS-intercepted with the locally-generated
+        // CA, and rejected outright unless that CA happens to be installed
+        // as a system-trusted certificate. `protect()` above only covers
+        // sockets *TcpIpStack itself* opens to relay someone else's
+        // traffic upstream; it does nothing for a completely separate
+        // OkHttpClient elsewhere in this same app making its own request.
+        // The practical effect without this exclusion: turning the
+        // Inspector on breaks every one of Lazlo's own network-dependent
+        // features at once (every backend that needs the network — BYOK,
+        // the local-model download — all fail with a generic connection
+        // error simultaneously) for as long as it stays on, which reads
+        // exactly like "the model doesn't work" with no obvious cause
+        // tying it back to a toggle on a different tab entirely.
+        runCatching { builder.addDisallowedApplication(packageName) }
+
         vpnInterface = builder.establish()
         vpnInterface?.let { fd ->
             scope.launch { running.pump(fd) }

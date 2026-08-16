@@ -16,8 +16,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Replay
@@ -31,6 +34,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -45,12 +49,16 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import com.evan.lazlo.proxy.TrafficEntry
 import com.evan.lazlo.proxy.net.RewriteRule
+import com.evan.lazlo.ui.theme.ScrollCard
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import org.json.JSONArray
+import org.json.JSONObject
 import java.time.Instant
 
 /**
@@ -85,7 +93,7 @@ fun InspectorScreen(
             .fillMaxSize()
             .padding(16.dp),
     ) {
-        Card(modifier = Modifier.fillMaxWidth()) {
+        ScrollCard(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Filled.Shield, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
@@ -123,7 +131,7 @@ fun InspectorScreen(
 
         Spacer(modifier = Modifier.size(12.dp))
 
-        Card(modifier = Modifier.fillMaxWidth()) {
+        ScrollCard(modifier = Modifier.fillMaxWidth(), showFlourish = false) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Filled.Screenshot, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
@@ -148,7 +156,7 @@ fun InspectorScreen(
 
         Spacer(modifier = Modifier.size(12.dp))
 
-        Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+        ScrollCard(modifier = Modifier.fillMaxWidth(), containerColor = MaterialTheme.colorScheme.surfaceVariant, showFlourish = false) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Filled.Lock, contentDescription = null)
@@ -177,7 +185,11 @@ fun InspectorScreen(
 
         Spacer(modifier = Modifier.size(12.dp))
 
-        Card(modifier = Modifier.fillMaxWidth(), onClick = { viewModel.setShowRewriteRules(true) }) {
+        ScrollCard(
+            modifier = Modifier.fillMaxWidth(),
+            showFlourish = false,
+            onClick = { viewModel.setShowRewriteRules(true) },
+        ) {
             Row(
                 modifier = Modifier.padding(16.dp).fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -201,9 +213,19 @@ fun InspectorScreen(
 
         state.lastReplayResult?.let { message ->
             Spacer(modifier = Modifier.size(8.dp))
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer), modifier = Modifier.fillMaxWidth()) {
-                Row(modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(message, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+            // Same dismissable-status-banner shape as ChatScreen's
+            // ErrorBanner and BrowserScreen's lastDownloadStarted message —
+            // a plain Surface, not a Card: this is transient, minor chrome,
+            // not a "major container" that warrants ScrollCard's border/
+            // flourish treatment.
+            Surface(color = MaterialTheme.colorScheme.secondaryContainer, modifier = Modifier.fillMaxWidth()) {
+                Row(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        modifier = Modifier.weight(1f),
+                    )
                     TextButton(onClick = viewModel::dismissReplayResult) { Text("Dismiss") }
                 }
             }
@@ -235,6 +257,7 @@ fun InspectorScreen(
                         now = now,
                         replaying = state.replayingUrl == entry.replay?.url,
                         onReplay = { viewModel.replay(entry) },
+                        onViewBody = { viewModel.showBody(entry) },
                     )
                 }
             }
@@ -248,6 +271,14 @@ fun InspectorScreen(
             onDelete = viewModel::deleteRewriteRule,
             onSetEnabled = viewModel::setRewriteRuleEnabled,
             onDismiss = { viewModel.setShowRewriteRules(false) },
+        )
+    }
+
+    state.viewingEntry?.let { entry ->
+        TrafficBodyDialog(
+            entry = entry,
+            findStructureHint = viewModel::structureHintFor,
+            onDismiss = viewModel::dismissBody,
         )
     }
 }
@@ -282,7 +313,13 @@ private fun EmptyTrafficState(inspectorEnabled: Boolean) {
 }
 
 @Composable
-private fun TrafficRow(entry: TrafficEntry, now: Instant, replaying: Boolean, onReplay: () -> Unit) {
+private fun TrafficRow(
+    entry: TrafficEntry,
+    now: Instant,
+    replaying: Boolean,
+    onReplay: () -> Unit,
+    onViewBody: () -> Unit,
+) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -326,6 +363,11 @@ private fun TrafficRow(entry: TrafficEntry, now: Instant, replaying: Boolean, on
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(modifier = Modifier.weight(1f))
+                if (entry.replay?.body?.isNotEmpty() == true) {
+                    IconButton(onClick = onViewBody, modifier = Modifier.size(28.dp)) {
+                        Icon(Icons.Filled.Code, contentDescription = "View request body", modifier = Modifier.size(18.dp))
+                    }
+                }
                 if (entry.replay != null) {
                     if (replaying) {
                         CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
@@ -335,6 +377,71 @@ private fun TrafficRow(entry: TrafficEntry, now: Instant, replaying: Boolean, on
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+/**
+ * A captured request's headers and body, with [structureHint] — the main
+ * JSON array [InspectorViewModel.structureHintFor] found, if any —
+ * called out above the body so a deeply nested payload doesn't have to
+ * be found by eye. Body is pretty-printed when it parses as JSON, shown
+ * as-is otherwise (plenty of captured bodies are form data, plain text,
+ * or nothing this app can usefully reformat).
+ */
+@Composable
+private fun TrafficBodyDialog(
+    entry: TrafficEntry,
+    findStructureHint: (host: String, body: String) -> JsonStructureScanner.Finding?,
+    onDismiss: () -> Unit,
+) {
+    val bodyText = entry.replay?.body?.let { String(it, Charsets.UTF_8) } ?: ""
+    val pretty = remember(bodyText) {
+        runCatching { JSONObject(bodyText).toString(2) }.getOrNull()
+            ?: runCatching { JSONArray(bodyText).toString(2) }.getOrNull()
+            ?: bodyText
+    }
+    val structureHint = remember(entry.host, bodyText) {
+        bodyText.takeIf { it.isNotEmpty() }?.let { findStructureHint(entry.host, it) }
+    }
+
+    Dialog(onDismissRequest = onDismiss) {
+        ScrollCard {
+            Column(modifier = Modifier.padding(20.dp)) {
+                // A raw method+host+path string is dense, punctuation-heavy
+                // technical content (slashes, query params) on the app's
+                // most trust-sensitive screen — not the short prominent
+                // label Cinzel Decorative (titleSmall's usual font here) is
+                // meant for. Keeps titleSmall's size/weight as this
+                // dialog's header but swaps in the same monospace face the
+                // body below already uses, instead of the decorative one.
+                Text(
+                    "${entry.method} ${entry.host}${entry.path}",
+                    style = MaterialTheme.typography.titleSmall.copy(fontFamily = FontFamily.Monospace),
+                    maxLines = 2,
+                )
+                structureHint?.let { hint ->
+                    Text(
+                        "Main array: ${hint.path} — ${hint.itemCount} item${if (hint.itemCount == 1) "" else "s"}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
+                Column(
+                    modifier = Modifier
+                        .padding(top = 12.dp)
+                        .weight(1f, fill = false)
+                        .verticalScroll(rememberScrollState()),
+                ) {
+                    Text(
+                        pretty.ifEmpty { "(empty body)" },
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
+                TextButton(onClick = onDismiss, modifier = Modifier.padding(top = 12.dp)) { Text("Close") }
             }
         }
     }
@@ -358,7 +465,7 @@ private fun RewriteRulesDialog(
     var showAddForm by remember { mutableStateOf(false) }
 
     Dialog(onDismissRequest = onDismiss) {
-        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+        ScrollCard {
             Column(modifier = Modifier.padding(20.dp)) {
                 Text("Rewrite rules", style = MaterialTheme.typography.titleMedium)
                 Text(

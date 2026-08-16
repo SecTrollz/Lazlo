@@ -38,6 +38,10 @@ data class InspectorUiState(
     val replayingUrl: String? = null,
     /** One-shot "Replayed — HTTP 200" / "Replay failed: ..." banner; cleared once shown. */
     val lastReplayResult: String? = null,
+    /** Non-null while the "view body" dialog is open for this entry. */
+    val viewingEntry: TrafficEntry? = null,
+    /** Mirrors Settings.pillPrivacyFlow; InspectorPillOverlay masks its live numbers while this is on. */
+    val pillPrivacyEnabled: Boolean = false,
 )
 
 /** Headers OkHttp derives itself from the URL/body — copying the originally-captured values for these onto a replayed request would either conflict with what OkHttp computes or just be wrong for a resend (a stale Content-Length after a hand-edited body, a Host that no longer matches). */
@@ -48,6 +52,7 @@ class InspectorViewModel(application: Application) : AndroidViewModel(applicatio
     private val settings = Settings(application)
     private val rewriteRuleStore = RewriteRuleStore(application)
     private val replayClient = OkHttpClient()
+    private val jsonPathCache = LearnedJsonPathCache()
 
     private val _uiState = MutableStateFlow(InspectorUiState())
     val uiState: StateFlow<InspectorUiState> = _uiState.asStateFlow()
@@ -67,6 +72,13 @@ class InspectorViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch {
             rewriteRuleStore.rules().collect { rules -> _uiState.update { it.copy(rewriteRules = rules) } }
         }
+        viewModelScope.launch {
+            settings.pillPrivacyFlow().collect { enabled -> _uiState.update { it.copy(pillPrivacyEnabled = enabled) } }
+        }
+    }
+
+    fun setPillPrivacyEnabled(enabled: Boolean) {
+        viewModelScope.launch { settings.setPillPrivacyEnabled(enabled) }
     }
 
     fun setScreenshotProtectionEnabled(enabled: Boolean) {
@@ -135,6 +147,30 @@ class InspectorViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun dismissReplayResult() = _uiState.update { it.copy(lastReplayResult = null) }
+
+    // --- Body viewer -------------------------------------------------
+
+    fun showBody(entry: TrafficEntry) = _uiState.update { it.copy(viewingEntry = entry) }
+    fun dismissBody() = _uiState.update { it.copy(viewingEntry = null) }
+
+    /**
+     * The "main array" hint [TrafficBodyDialog] shows above a JSON body,
+     * cache-first: a cached path for [host] is trusted only if it still
+     * resolves to an array in this [body] (a host can start returning a
+     * different shape — a new endpoint, an API version bump — and a
+     * stale cached path pointing at nothing would be worse than no hint
+     * at all). Falls back to a fresh [JsonStructureScanner.scan] on a
+     * cache miss or a path that no longer resolves, and remembers
+     * whatever that scan finds for next time.
+     */
+    fun structureHintFor(host: String, body: String): JsonStructureScanner.Finding? {
+        jsonPathCache.get(host)?.let { cached ->
+            val length = JsonStructureScanner.resolveArrayLength(body, cached.path)
+            if (length != null) return cached.copy(itemCount = length)
+            jsonPathCache.forget(host)
+        }
+        return JsonStructureScanner.scan(body)?.also { jsonPathCache.learn(host, it) }
+    }
 
     /**
      * Persists the toggle as "on" and makes sure the local CA exists —

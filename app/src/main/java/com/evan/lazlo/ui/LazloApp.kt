@@ -1,6 +1,7 @@
 package com.evan.lazlo.ui
 
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
@@ -20,11 +21,15 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.unit.dp
 import com.evan.lazlo.ui.browser.BrowserScreen
 import com.evan.lazlo.ui.chat.ChatScreen
 import com.evan.lazlo.ui.inspector.InspectorScreen
+import com.evan.lazlo.ui.theme.CornerFlourish
+import com.evan.lazlo.ui.theme.FlourishCorner
 
 /** The three top-level sections, in bottom-nav order. */
 enum class LazloTab(val label: String, val icon: ImageVector, val subtitle: String) {
@@ -48,7 +53,21 @@ fun LazloApp() {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Lazlo — ${selectedTab.subtitle}") },
+                title = {
+                    // A single small flourish beside the wordmark — the
+                    // one place this reskin's ornament shows up on every
+                    // screen rather than just on dialogs/cards — kept to
+                    // one corner-sized mark so it reads as a margin
+                    // doodle next to the title, not a logo of its own.
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CornerFlourish(
+                            corner = FlourishCorner.TopStart,
+                            modifier = Modifier.padding(end = 6.dp),
+                            size = 18.dp,
+                        )
+                        Text("Lazlo — ${selectedTab.subtitle}")
+                    }
+                },
             )
         },
         bottomBar = {
@@ -69,6 +88,17 @@ fun LazloApp() {
                 LazloTab.CHAT -> ChatScreen()
                 LazloTab.BROWSER -> BrowserScreen()
                 LazloTab.INSPECTOR -> InspectorScreen()
+            }
+            // Suppressed on the Inspector tab itself — InspectorScreen
+            // already shows this same status live there, so a second copy
+            // floating on top of it would just be redundant chrome.
+            if (selectedTab != LazloTab.INSPECTOR) {
+                InspectorPillOverlay(
+                    onOpenInspectorTab = { selectedTab = LazloTab.INSPECTOR },
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(end = 16.dp, bottom = 16.dp),
+                )
             }
         }
     }
