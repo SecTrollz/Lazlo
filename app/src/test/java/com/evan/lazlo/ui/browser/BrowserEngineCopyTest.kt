@@ -28,4 +28,16 @@ class BrowserEngineCopyTest {
     fun `gecko explanation mentions firefox`() {
         assertTrue(BrowserEngineCopy.explanation(EngineKind.GECKO).contains("Firefox", ignoreCase = true))
     }
+
+    @Test
+    fun `chromium explanation calls out that it's hardened against WebView fingerprinting`() {
+        val explanation = BrowserEngineCopy.explanation(EngineKind.CHROMIUM)
+        assertTrue(explanation.contains("fingerprint", ignoreCase = true))
+        assertTrue(BrowserEngineCopy.shortLabel(EngineKind.CHROMIUM).contains("hardened", ignoreCase = true))
+    }
+
+    @Test
+    fun `gecko is labeled as the default, since it doesn't carry WebView's embedded-browser signature`() {
+        assertTrue(BrowserEngineCopy.shortLabel(EngineKind.GECKO).contains("default", ignoreCase = true))
+    }
 }

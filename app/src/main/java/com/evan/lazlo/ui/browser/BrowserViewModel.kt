@@ -10,6 +10,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.evan.lazlo.browser.BrowserEngineLoader
+import com.evan.lazlo.browser.BrowserScript
+import com.evan.lazlo.browser.BrowserScriptStore
 import com.evan.lazlo.browser.DownloadRequest
 import com.evan.lazlo.browser.EngineKind
 import com.evan.lazlo.browser.GeckoModuleState
@@ -56,6 +58,10 @@ data class BrowserUiState(
     val downloads: List<DownloadRecord> = emptyList(),
     /** One-shot "Downloading <file>" confirmation; cleared once shown. */
     val lastDownloadStarted: String? = null,
+    val scripts: List<BrowserScript> = emptyList(),
+    val showScripts: Boolean = false,
+    /** Non-null while the script editor dialog is open — an existing script being edited, or a blank one for "New script". */
+    val editingScript: BrowserScript? = null,
 ) {
     val activeTab: BrowserTab? get() = tabs.find { it.id == activeTabId }
     val isCurrentPageBookmarked: Boolean get() = currentUrl != null && bookmarks.any { it.url == currentUrl }
@@ -67,6 +73,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
 
     private val settings = Settings(application)
     private val browserDataStore = BrowserDataStore(application)
+    private val scriptStore = BrowserScriptStore(application)
     val browserEngineLoader = BrowserEngineLoader(application)
 
     private val initialTab = BrowserTab(id = UUID.randomUUID().toString(), url = START_PAGE)
@@ -78,16 +85,21 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     init {
         viewModelScope.launch {
             val kind = settings.browserEngine()
-            // GeckoView was picked in a previous session but its module
-            // isn't installed this time (a fresh install, cleared data,
-            // or the OS uninstalled an unused split) — fall back to
-            // Chromium rather than silently failing to render anything.
-            val usable = if (kind == EngineKind.GECKO && !browserEngineLoader.isGeckoModuleInstalled()) {
-                EngineKind.CHROMIUM
+            if (kind == EngineKind.GECKO && !browserEngineLoader.isGeckoModuleInstalled()) {
+                // GeckoView is the default (see Settings.browserEngine) but
+                // its module hasn't downloaded yet — first-ever launch, a
+                // fresh install, cleared data, or the OS reclaiming an
+                // unused split. Render on Chromium/WebView only as a
+                // stopgap for this one screen while the real engine
+                // fetches itself in the background — the whole point of
+                // making Gecko the default is that WebView's fingerprint
+                // gets sites banned, so this shouldn't silently settle for
+                // it long-term the way it used to.
+                _uiState.update { it.copy(engineKind = EngineKind.CHROMIUM) }
+                startGeckoModuleInstall()
             } else {
-                kind
+                _uiState.update { it.copy(engineKind = kind) }
             }
-            _uiState.update { it.copy(engineKind = usable) }
         }
         viewModelScope.launch {
             browserDataStore.history().collect { entries -> _uiState.update { it.copy(history = entries) } }
@@ -97,6 +109,9 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         }
         viewModelScope.launch {
             browserDataStore.downloads().collect { entries -> _uiState.update { it.copy(downloads = entries) } }
+        }
+        viewModelScope.launch {
+            scriptStore.scripts().collect { entries -> _uiState.update { it.copy(scripts = entries) } }
         }
     }
 
@@ -126,13 +141,20 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     private fun startGeckoModuleInstall() {
         _uiState.update { it.copy(geckoModuleState = GeckoModuleState.NotInstalled) }
         viewModelScope.launch {
-            launch {
+            val progressJob = launch {
                 browserEngineLoader.installState().collect { state ->
                     _uiState.update { it.copy(geckoModuleState = state) }
                     if (state is GeckoModuleState.Installed) applyEngine(EngineKind.GECKO)
                 }
             }
-            browserEngineLoader.requestInstall()
+            // Non-null only if the request couldn't even start (see
+            // requestInstall()'s doc comment) — installState() will never
+            // emit anything for a request that never got a session, so
+            // this is the only place that failure surfaces from.
+            browserEngineLoader.requestInstall()?.let { failure ->
+                progressJob.cancel()
+                _uiState.update { it.copy(geckoModuleState = failure) }
+            }
         }
     }
 
@@ -280,6 +302,33 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun dismissDownloadStartedMessage() = _uiState.update { it.copy(lastDownloadStarted = null) }
+
+    // --- Scripts (page automation) --------------------------------------
+
+    fun setShowScripts(show: Boolean) = _uiState.update { it.copy(showScripts = show) }
+
+    fun startNewScript() = _uiState.update { it.copy(editingScript = BrowserScript(id = BrowserScriptStore.newId())) }
+
+    fun startEditScript(script: BrowserScript) = _uiState.update { it.copy(editingScript = script) }
+
+    fun dismissScriptEditor() = _uiState.update { it.copy(editingScript = null) }
+
+    fun saveScript(script: BrowserScript) {
+        viewModelScope.launch { scriptStore.addOrUpdate(script) }
+        _uiState.update { it.copy(editingScript = null) }
+    }
+
+    fun deleteScript(id: String) {
+        viewModelScope.launch { scriptStore.remove(id) }
+        _uiState.update { it.copy(editingScript = null) }
+    }
+
+    fun setScriptEnabled(id: String, enabled: Boolean) {
+        viewModelScope.launch { scriptStore.setEnabled(id, enabled) }
+    }
+
+    /** Enabled scripts whose match pattern hits [url] — what [BrowserScreen] runs once a page finishes loading. */
+    fun scriptsForUrl(url: String): List<BrowserScript> = _uiState.value.scripts.filter { it.enabled && it.matchesUrl(url) }
 
     class Factory(private val application: Application) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")

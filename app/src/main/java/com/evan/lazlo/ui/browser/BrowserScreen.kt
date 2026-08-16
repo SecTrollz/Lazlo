@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -25,6 +26,8 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Code
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Public
@@ -33,8 +36,6 @@ import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -42,6 +43,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -60,11 +62,15 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.evan.lazlo.browser.BrowserEngine
+import com.evan.lazlo.browser.BrowserScript
 import com.evan.lazlo.browser.ChromiumEngine
 import com.evan.lazlo.browser.EngineKind
+import com.evan.lazlo.browser.GeckoModuleDiagnosis
 import com.evan.lazlo.browser.GeckoModuleState
 import com.evan.lazlo.core.BrowserRecord
 import com.evan.lazlo.core.DownloadRecord
+import com.evan.lazlo.ui.theme.FootstepLoader
+import com.evan.lazlo.ui.theme.ScrollCard
 
 /**
  * The browsing tab: a real multi-tab browser — tab strip, address bar
@@ -159,6 +165,12 @@ fun BrowserScreen(
                 label = { Text("Downloads (${state.downloads.size})") },
                 leadingIcon = { Icon(Icons.Filled.Download, contentDescription = null) },
             )
+            AssistChip(
+                onClick = { viewModel.setShowScripts(true) },
+                label = { Text("Scripts (${state.scripts.size})") },
+                leadingIcon = { Icon(Icons.Filled.Code, contentDescription = null) },
+                modifier = Modifier.padding(start = 4.dp),
+            )
         }
 
         state.lastDownloadStarted?.let { fileName ->
@@ -200,7 +212,19 @@ fun BrowserScreen(
                         engine.onUrlChanged = { url ->
                             viewModel.onNavigationStateChanged(url, engine.canGoBack(), engine.canGoForward())
                         }
-                        engine.onLoadingChanged = { loading -> viewModel.onLoadingChanged(loading) }
+                        engine.onLoadingChanged = { loading ->
+                            viewModel.onLoadingChanged(loading)
+                            // Auto-run on page finish, not page start: a
+                            // script that expects the page's own DOM/JS to
+                            // already be in place (the normal case for a
+                            // userscript) would find an empty document if
+                            // it ran on onPageStarted instead.
+                            if (!loading) {
+                                engine.currentUrl()?.let { url ->
+                                    viewModel.scriptsForUrl(url).forEach { engine.runScript(it.code) }
+                                }
+                            }
+                        }
                         engine.onTitleChanged = { title -> viewModel.onTitleChanged(title) }
                         engine.onDownloadRequested = { request -> viewModel.onDownloadRequested(request) }
                         engine.attach(container)
@@ -268,6 +292,26 @@ fun BrowserScreen(
             onDismiss = { viewModel.setShowDownloads(false) },
         )
     }
+
+    if (state.showScripts) {
+        ScriptsDialog(
+            scripts = state.scripts,
+            onSetEnabled = viewModel::setScriptEnabled,
+            onEdit = viewModel::startEditScript,
+            onNew = viewModel::startNewScript,
+            onDismiss = { viewModel.setShowScripts(false) },
+        )
+    }
+
+    state.editingScript?.let { script ->
+        ScriptEditorDialog(
+            script = script,
+            isNew = state.scripts.none { it.id == script.id },
+            onSave = viewModel::saveScript,
+            onDelete = { viewModel.deleteScript(script.id) },
+            onDismiss = viewModel::dismissScriptEditor,
+        )
+    }
 }
 
 @Composable
@@ -326,7 +370,7 @@ private fun RecordListDialog(
     trailingAction: (@Composable () -> Unit)? = null,
 ) {
     Dialog(onDismissRequest = onDismiss) {
-        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+        ScrollCard {
             Column(modifier = Modifier.padding(20.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
@@ -367,7 +411,7 @@ private fun RecordListDialog(
 @Composable
 private fun DownloadsDialog(downloads: List<DownloadRecord>, onDismiss: () -> Unit) {
     Dialog(onDismissRequest = onDismiss) {
-        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+        ScrollCard {
             Column(modifier = Modifier.padding(20.dp)) {
                 Text("Downloads", style = MaterialTheme.typography.titleMedium)
                 Text(
@@ -398,6 +442,135 @@ private fun DownloadsDialog(downloads: List<DownloadRecord>, onDismiss: () -> Un
     }
 }
 
+/**
+ * Lists saved [BrowserScript]s with an inline enable/disable switch (same
+ * quick-toggle shape as [InspectorPillOverlay]'s Rules tab) plus a way
+ * into the editor for a new or existing one.
+ */
+@Composable
+private fun ScriptsDialog(
+    scripts: List<BrowserScript>,
+    onSetEnabled: (String, Boolean) -> Unit,
+    onEdit: (BrowserScript) -> Unit,
+    onNew: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        ScrollCard {
+            Column(modifier = Modifier.padding(20.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Scripts", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                    TextButton(onClick = onNew) { Text("New") }
+                }
+                Text(
+                    "Runs in the page's own context once a matching page finishes loading — for automating " +
+                        "repeat actions on sites you use, or testing sites you control. Scripts can't reach " +
+                        "anything outside that page: no other tabs, no device APIs, no Lazlo data.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp, bottom = 12.dp),
+                )
+                if (scripts.isEmpty()) {
+                    Text(
+                        "No scripts yet — tap New to add one.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                } else {
+                    LazyColumn {
+                        items(scripts, key = { it.id }) { script ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable(onClick = { onEdit(script) })
+                                    .padding(vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        script.name.ifBlank { "Untitled script" },
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        maxLines = 1,
+                                    )
+                                    Text(
+                                        script.urlContains.ifBlank { "No match pattern set" },
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                    )
+                                }
+                                Switch(checked = script.enabled, onCheckedChange = { onSetEnabled(script.id, it) })
+                            }
+                        }
+                    }
+                }
+                TextButton(onClick = onDismiss, modifier = Modifier.padding(top = 8.dp)) { Text("Close") }
+            }
+        }
+    }
+}
+
+/** Add/edit form for one [BrowserScript] — name, URL match substring, and the JS body itself. */
+@Composable
+private fun ScriptEditorDialog(
+    script: BrowserScript,
+    isNew: Boolean,
+    onSave: (BrowserScript) -> Unit,
+    onDelete: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var name by remember(script.id) { mutableStateOf(script.name) }
+    var urlContains by remember(script.id) { mutableStateOf(script.urlContains) }
+    var code by remember(script.id) { mutableStateOf(script.code) }
+
+    Dialog(onDismissRequest = onDismiss) {
+        ScrollCard {
+            Column(modifier = Modifier.padding(20.dp)) {
+                Text(
+                    if (isNew) "New script" else "Edit script",
+                    style = MaterialTheme.typography.titleMedium,
+                )
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("Name") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+                )
+                OutlinedTextField(
+                    value = urlContains,
+                    onValueChange = { urlContains = it },
+                    label = { Text("Runs on pages whose URL contains…") },
+                    placeholder = { Text("example.com") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                )
+                OutlinedTextField(
+                    value = code,
+                    onValueChange = { code = it },
+                    label = { Text("JavaScript") },
+                    placeholder = { Text("document.querySelectorAll('...')…") },
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                    minLines = 6,
+                )
+                Row(modifier = Modifier.padding(top = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    if (!isNew) {
+                        IconButton(onClick = onDelete) {
+                            Icon(Icons.Filled.Delete, contentDescription = "Delete this script")
+                        }
+                    }
+                    Row(modifier = Modifier.weight(1f), horizontalArrangement = Arrangement.End) {
+                        TextButton(onClick = onDismiss) { Text("Cancel") }
+                        Button(
+                            onClick = { onSave(script.copy(name = name, urlContains = urlContains, code = code)) },
+                            enabled = urlContains.isNotBlank() && code.isNotBlank(),
+                        ) { Text("Save") }
+                    }
+                }
+            }
+        }
+    }
+}
+
 private tailrec fun Context.findActivity(): Activity? = when (this) {
     is Activity -> this
     is ContextWrapper -> baseContext.findActivity()
@@ -418,7 +591,7 @@ private fun GeckoModuleInstallDialog(
     onConfirmInstall: (Activity, com.google.android.play.core.splitinstall.SplitInstallSessionState) -> Unit,
 ) {
     Dialog(onDismissRequest = onDismiss) {
-        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+        ScrollCard {
             Column(modifier = Modifier.padding(20.dp)) {
                 Text("Downloading GeckoView", style = MaterialTheme.typography.titleMedium)
                 Text(
@@ -428,12 +601,20 @@ private fun GeckoModuleInstallDialog(
                 )
                 when (state) {
                     is GeckoModuleState.NotInstalled, GeckoModuleState.Installing -> {
-                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                        Text(
-                            if (state == GeckoModuleState.Installing) "Installing…" else "Starting download…",
-                            style = MaterialTheme.typography.bodySmall,
-                            modifier = Modifier.padding(top = 8.dp),
-                        )
+                        // No byte count yet at this stage (that only exists
+                        // once GeckoModuleState.Downloading reports real
+                        // progress below) — an indefinite wait, so this
+                        // uses the same footstep motif as the rest of the
+                        // app's "no known duration or size" states rather
+                        // than an indeterminate progress bar.
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            FootstepLoader(footprintSize = 9.dp, color = MaterialTheme.colorScheme.primary)
+                            Spacer(modifier = Modifier.size(8.dp))
+                            Text(
+                                if (state == GeckoModuleState.Installing) "Installing…" else "Starting download…",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
                     }
                     is GeckoModuleState.Downloading -> {
                         val fraction = if (state.totalBytes > 0) (state.bytesDownloaded.toFloat() / state.totalBytes) else 0f
@@ -462,7 +643,7 @@ private fun GeckoModuleInstallDialog(
                     }
                     is GeckoModuleState.Failed -> {
                         Text(
-                            "The download didn't complete (error ${state.errorCode}). Staying on the current engine.",
+                            GeckoModuleDiagnosis.messageFor(state.errorCode),
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
@@ -479,7 +660,7 @@ private fun EnginePickerDialog(
     onDismiss: () -> Unit,
 ) {
     Dialog(onDismissRequest = onDismiss) {
-        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+        ScrollCard {
             Column(modifier = Modifier.padding(20.dp)) {
                 Text("Choose a browser engine", style = MaterialTheme.typography.titleMedium)
                 Text(
